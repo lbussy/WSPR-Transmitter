@@ -145,7 +145,7 @@ int main()
     std::cout << "TX started at: " << timeval_print(&tv_begin) << std::endl;
 
     // Execute transmission
-    wsprTransmitter.start_threaded_transmission(SCHED_FIFO, 30);
+    wsprTransmitter.start_transmission(SCHED_FIFO, 30);
 
     if (isWspr)
     {

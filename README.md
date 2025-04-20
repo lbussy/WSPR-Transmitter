@@ -53,7 +53,7 @@ int main() {
     tx.setup_transmission(7.040100e6, 0, 12, "", "", 0, false);
 
     // Start in real-time thread (FIFO, priority 30)
-    tx.start_threaded_transmission(SCHED_FIFO, 30);
+    tx.start_transmission(SCHED_FIFO, 30);
 
     // Wait for user to stop
     std::cout << "Press <space> to stop...";
@@ -74,7 +74,7 @@ int main() {
 
 Configure frequency, PPM adjustment, power, callsign/grid (for WSPR), and mode.
 
-### `void start_threaded_transmission(int policy, int priority)`
+### `void start_transmission(int policy, int priority)`
 
 Launches transmission in a background thread with the given scheduling policy and priority.
 

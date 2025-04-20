@@ -102,7 +102,7 @@ public:
      *
      * @param cb  A callable with signature `void()`.  If empty, no callback.
      */
-    void setWsprCompleteCallback(CompletionCallback cb) noexcept
+    void set_wspr_complete_callback(CompletionCallback cb) noexcept
     {
         on_wspr_complete_ = std::move(cb);
     }
@@ -119,7 +119,7 @@ public:
      * @param[in] priority The thread priority (1–99 for real‑time policies;
      *                     ignored by SCHED_OTHER).
      */
-    void start_threaded_transmission(int policy = SCHED_FIFO, int priority = 30);
+    void start_transmission(int policy = SCHED_FIFO, int priority = 30);
 
     /**
      * @brief Request an in‑flight transmission to stop.
@@ -134,7 +134,7 @@ public:
      * @brief Waits for the background transmission thread to finish.
      *
      * @details If the transmission thread was launched via
-     *          start_threaded_transmission(), this call will block until
+     *          start_transmission(), this call will block until
      *          that thread has completed and joined. After returning,
      *          tx_thread_ is no longer joinable.
      */
@@ -205,7 +205,7 @@ public:
      *      and `timeval_subtract()` to schedule precise symbol timing.
      *   5. Disables transmission when complete.
      *
-     * @note In tone mode (`transParams.is_tone == true`), this function only
+     * @note In tone mode (`trans_params_.is_tone == true`), this function only
      *       returns via SIGINT.
      */
     void transmit();
@@ -273,7 +273,7 @@ private:
     /**
      * @brief Callback invoked upon completion of a WSPR transmission.
      *
-     * @details If set via setWsprCompleteCallback(), this callable is executed
+     * @details If set via set_wspr_complete_callback(), this callable is executed
      *          on the transmission thread immediately after the last WSPR symbol
      *          has been sent and before the DMA/PWM is shut down. If no callback
      *          is provided, this remains empty and no notification occurs.
@@ -283,7 +283,7 @@ private:
     /**
      * @brief Background thread for carrying out the transmission.
      *
-     * Launched by start_threaded_transmission() and joined by
+     * Launched by start_transmission() and joined by
      * join_transmission().
      */
     std::thread tx_thread_;
@@ -349,7 +349,7 @@ private:
      * which is used to store fixed data required for DMA operations, such as the tuning words
      * for frequency generation.
      */
-    struct PageInfo constPage;
+    struct PageInfo const_page_;
 
     /**
      * @brief Page information for the DMA instruction page.
@@ -358,7 +358,7 @@ private:
      * where DMA control blocks (CBs) are stored. This page is used during the setup and
      * operation of DMA transfers.
      */
-    struct PageInfo instrPage;
+    struct PageInfo instr_page_;
 
     /**
      * @brief Array of page information structures for DMA control blocks.
@@ -367,7 +367,7 @@ private:
      * instruction chain. It holds 1024 entries, corresponding to the 1024 DMA control blocks used
      * for managing data transfers.
      */
-    struct PageInfo instrs[1024];
+    struct PageInfo instructions_[1024];
 
     /**
      * @brief Structure containing parameters for a WSPR transmission.
@@ -420,7 +420,7 @@ private:
      * including the WSPR message, transmission frequency, symbol time, tone spacing,
      * and the DMA frequency lookup table.
      */
-    struct WsprTransmissionParams transParams;
+    struct WsprTransmissionParams trans_params_;
 
     /**
      * @brief DMA configuration and saved state for transmission setup/cleanup.
@@ -474,7 +474,7 @@ private:
      *
      * This DMAConfig instance holds the transmission functionality global objects.
      */
-    struct DMAConfig dmaConfig;
+    struct DMAConfig dma_config_;
 
     /**
      * @brief Global mailbox structure for Broadcom mailbox communication.
@@ -484,17 +484,17 @@ private:
      * It is declared as a file-scope static variable so that exit handlers and other parts
      * of the program can access its members.
      *
-     * @var mbox::handle
+     * @var mailbox_::handle
      *      Mailbox handle obtained from mbox_open(), used for communication with the mailbox.
-     * @var mbox::mem_ref
+     * @var mailbox_::mem_ref
      *      Memory reference returned by mem_alloc(), identifying the allocated memory block.
-     * @var mbox::bus_addr
+     * @var mailbox_::bus_addr
      *      Bus address of the allocated memory, obtained from mem_lock().
-     * @var mbox::virt_addr
+     * @var mailbox_::virt_addr
      *      Virtual address mapped to the allocated physical memory via mapmem().
-     * @var mbox::pool_size
+     * @var mailbox_::pool_size
      *      The total number of memory pages allocated in the pool.
-     * @var mbox::pool_cnt
+     * @var mailbox_::pool_cnt
      *      The count of memory pages that have been allocated from the pool so far.
      */
     struct Mailbox
@@ -515,7 +515,7 @@ private:
      * the virtual address pointer (from mapmem()), and the pool parameters
      * for page allocation.
      */
-    Mailbox mbox;
+    Mailbox mailbox_;
 
     /**
      * @brief Control Block (CB) structure for DMA engine commands.
@@ -820,29 +820,29 @@ private:
      * @param bus_addr The bus address from which to calculate the corresponding virtual address.
      * @return A reference to a volatile int located at the computed virtual address.
      */
-    inline volatile int &accessBusAddress(std::uintptr_t bus_addr);
+    inline volatile int &access_bus_address(std::uintptr_t bus_addr);
 
     /**
      * @brief Sets a specified bit at a bus address in the peripheral address space.
      *
      * This function accesses the virtual address corresponding to the given bus address using
-     * the `accessBusAddress()` function and sets the bit at the provided position.
+     * the `access_bus_address()` function and sets the bit at the provided position.
      *
      * @param base The bus address in the peripheral address space.
      * @param bit The bit number to set (0-indexed).
      */
-    inline void setBitBusAddress(std::uintptr_t base, unsigned int bit);
+    inline void set_bit_bus_address(std::uintptr_t base, unsigned int bit);
 
     /**
      * @brief Clears a specified bit at a bus address in the peripheral address space.
      *
      * This function accesses the virtual address corresponding to the given bus address using
-     * the `accessBusAddress()` function and clears the bit at the provided position.
+     * the `access_bus_address()` function and clears the bit at the provided position.
      *
      * @param base The bus address in the peripheral address space.
      * @param bit The bit number to clear (0-indexed).
      */
-    inline void clearBitBusAddress(std::uintptr_t base, unsigned int bit);
+    inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
 
     /**
      * @brief Converts a bus address to a physical address.
@@ -853,7 +853,7 @@ private:
      * @param x The bus address.
      * @return The physical address obtained from the bus address.
      */
-    inline std::uintptr_t busToPhys(std::uintptr_t x);
+    inline std::uintptr_t bus_to_physical(std::uintptr_t x);
 
     /**
      * @brief Computes the difference between two time values.
@@ -874,10 +874,10 @@ private:
      *   1. Reads the Raspberry Pi hardware revision from `/proc/cpuinfo` (cached
      *      after first read).
      *   2. Determines the processor ID (BCM2835, BCM2836/37, or BCM2711).
-     *   3. Sets `dmaConfig.mem_flag` to the correct mailbox allocation flag.
-     *   4. Sets `dmaConfig.plld_nominal_freq` to the board’s true PLLD base
+     *   3. Sets `dma_config_.mem_flag` to the correct mailbox allocation flag.
+     *   4. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
      *      frequency (500 MHz for Pi 1/2/3, 750 MHz for Pi 4).
-     *   5. Initializes `dmaConfig.plld_clock_frequency` equal to
+     *   5. Initializes `dma_config_.plld_clock_frequency` equal to
      *      `plld_nominal_freq` (zero PPM correction).
      *
      * @throws std::runtime_error if the processor ID is unrecognized.
@@ -892,7 +892,7 @@ private:
      *
      * This is used for low-level register access to GPIO, clocks, DMA, etc.
      *
-     * @param[out] dmaConfig.peripheral_base_virtual Reference to a pointer that will
+     * @param[out] dma_config_.peripheral_base_virtual Reference to a pointer that will
      *             be set to the mapped virtual memory address.
      *
      * @throws Terminates the program if the peripheral base cannot be determined,
@@ -1008,15 +1008,15 @@ private:
      *          circular inked list of DMA instructions, and configures the
      *          PWM clock and registers.
      *
-     * @param[out] constPage PageInfo structure for storing constant data.
-     * @param[out] instrPage PageInfo structure for the initial DMA instruction
+     * @param[out] const_page_ PageInfo structure for storing constant data.
+     * @param[out] instr_page_ PageInfo structure for the initial DMA instruction
      *                       page.
-     * @param[out] instrs Array of PageInfo structures for DMA instructions.
+     * @param[out] instructions_ Array of PageInfo structures for DMA instructions.
      */
     void create_dma_pages(
-        struct PageInfo &constPage,
-        struct PageInfo &instrPage,
-        struct PageInfo instrs[]);
+        struct PageInfo &const_page_,
+        struct PageInfo &instr_page_,
+        struct PageInfo instructions_[]);
 
     /**
      * @brief Configure and initialize the DMA system for WSPR transmission.
@@ -1043,7 +1043,7 @@ private:
      * @param[in] tone_spacing The spacing between frequency tones in Hz.
      * @param[in] plld_actual_freq The actual PLLD clock frequency in Hz.
      * @param[out] center_freq_actual The actual center frequency, which may be adjusted.
-     * @param[in,out] constPage The PageInfo structure for storing tuning words.
+     * @param[in,out] const_page_ The PageInfo structure for storing tuning words.
      */
     void setup_dma_freq_table(double &center_freq_actual);
 
