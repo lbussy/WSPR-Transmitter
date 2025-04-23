@@ -94,6 +94,7 @@ CXXFLAGS := -Wno-psabi -lstdc++fs -std=c++$(CXXVER)
 CXXFLAGS += $(COMMON_FLAGS) $(COMM_CXX_FLAGS)
 
 # Include paths
+CXXFLAGS += -I$(abspath ../external)
 CXXFLAGS += -I$(abspath .)
 CXXFLAGS += $(foreach dir,$(SUBMODULE_SRCDIRS),-I$(abspath $(dir)))
 

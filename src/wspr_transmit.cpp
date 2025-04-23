@@ -471,6 +471,12 @@ void WsprTransmitter::dma_cleanup()
     }
     cleanup_done = true;
 
+    // If we never mapped the peripherals, nothing to tear down:
+    if (!dma_config_.peripheral_base_virtual)
+    {
+        return;
+    }
+
     // Stop DMA transfers and disable PWM clock
     transmit_off();
 

@@ -92,8 +92,6 @@ void sig_handler(int sig = SIGTERM)
     g_stop.store(true);
     std::cout << "Shutting down transmissions." << std::endl;
     wsprTransmitter.shutdown_transmitter();
-    std::cout << "Reset DMA." << std::endl;
-    wsprTransmitter.dma_cleanup();
     exit(EXIT_SUCCESS);
 }
 
@@ -172,7 +170,6 @@ int main()
     // update_dma_for_ppm(config.ppm);
 
     wsprTransmitter.shutdown_transmitter();
-    wsprTransmitter.dma_cleanup();
 
     return 0;
 }
