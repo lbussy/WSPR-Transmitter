@@ -5,34 +5,6 @@
 #include <vector>
 
 /**
- * @enum ModeType
- * @brief Specifies the mode of operation for the application.
- *
- * This enumeration defines the available modes for operation.
- * - `WSPR`: Represents the WSPR (Weak Signal Propagation Reporter) transmission mode.
- * - `TONE`: Represents a test tone generation mode.
- */
-enum class ModeType
-{
-    WSPR, ///< WSPR transmission mode
-    TONE  ///< Test tone generation mode
-};
-
-/**
- * @enum WsprMode
- * @brief Specifies the WSPR mode for the frequency.
- *
- * This enumeration defines the available modes for operation.
- * - `WSPR2`: Indicates a standard (2-minute) transmission.
- * - `WSPR15`: Indicates a slow (15-minute) transmission.
- */
-enum class WsprMode
-{
-    WSPR2, ///< WSPR transmission mode
-    WSPR15  ///< Test tone generation mode
-};
-
-/**
  * @brief Global configuration instance for argument parsing and runtime settings.
  *
  * @details
@@ -74,7 +46,6 @@ struct ArgParserConfig
     double test_tone;   ///< Enable continuous tone mode (in Hz).
 
     // Runtime variables
-    ModeType mode;                       ///< Current operating mode.
     bool use_ini;                        ///< Load configuration from INI file.
     std::string ini_filename;            ///< INI file name and path.
     std::vector<double> center_freq_set; ///< Parsed list of center frequencies in Hz.
@@ -103,7 +74,6 @@ struct ArgParserConfig
           loop_tx(false),
           tx_iterations(0),
           test_tone(0.0),
-          mode(ModeType::WSPR),
           use_ini(false),
           ini_filename(""),
           center_freq_set({})

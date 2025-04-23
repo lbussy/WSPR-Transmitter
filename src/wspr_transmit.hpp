@@ -45,6 +45,20 @@
 #include <pthread.h>
 
 /**
+ * @enum WsprMode
+ * @brief Specifies the WSPR mode for the frequency.
+ *
+ * This enumeration defines the available modes for operation.
+ * - `WSPR2`: Indicates a standard (2-minute) transmission.
+ * - `WSPR15`: Indicates a slow (15-minute) transmission.
+ */
+enum class WsprMode
+{
+    WSPR2, ///< WSPR transmission mode
+    WSPR15  ///< Test tone generation mode
+};
+
+/**
  * @class WsprTransmitter
  * @brief Encapsulates configuration and DMA‑driven transmission of WSPR signals.
  *
