@@ -83,7 +83,7 @@ WsprTransmitter wsprTransmitter;
  * @brief Constructs a WSPR transmitter with default settings.
  *
  * @details Initializes the WSPR transmitter object. Transmission parameters
- * are configured later via setup_transmission(). This constructor does not
+ * are configured later via setupTransmission(). This constructor does not
  * allocate hardware resources or initiate any transmissions.
  */
 WsprTransmitter::WsprTransmitter()
@@ -100,7 +100,7 @@ WsprTransmitter::WsprTransmitter()
 WsprTransmitter::~WsprTransmitter()
 {
     // Cleanup all DMA setup and memory regions
-    dma_cleanup();
+    dmaCleanup();
 }
 
 /**
@@ -126,7 +126,7 @@ WsprTransmitter::~WsprTransmitter()
  *
  * @throws std::runtime_error if DMA setup or mailbox operations fail.
  */
-void WsprTransmitter::setup_transmission(
+void WsprTransmitter::setupTransmission(
     double frequency,
     int power,
     double ppm,
@@ -319,7 +319,7 @@ void WsprTransmitter::transmit()
  * @param[in] priority The thread priority (1–99 for real‑time policies;
  *                     ignored by SCHED_OTHER).
  */
-void WsprTransmitter::start_transmission(int policy, int priority)
+void WsprTransmitter::startTransmission(int policy, int priority)
 {
     thread_policy_ = policy;
     thread_priority_ = priority;
@@ -336,7 +336,7 @@ void WsprTransmitter::start_transmission(int policy, int priority)
  *          thread will exit at the next interruption point. Notifies any
  *          condition_variable waits to unblock the thread promptly.
  */
-void WsprTransmitter::stop_transmission()
+void WsprTransmitter::stopTransmission()
 {
     // Tell the worker to stop
     stop_requested_.store(true);
@@ -348,11 +348,11 @@ void WsprTransmitter::stop_transmission()
  * @brief Waits for the background transmission thread to finish.
  *
  * @details If the transmission thread was launched via
- *          start_transmission(), this call will block until
+ *          startTransmission(), this call will block until
  *          that thread has completed and joined. After returning,
  *          tx_thread_ is no longer joinable.
  */
-void WsprTransmitter::join_transmission()
+void WsprTransmitter::joinTransmission()
 {
     if (tx_thread_.joinable())
     {
@@ -363,28 +363,28 @@ void WsprTransmitter::join_transmission()
 /**
  * @brief Gracefully stops and waits for the transmission thread.
  *
- * @details Combines stop_transmission() to signal the worker thread to
- *          exit, and join_transmission() to block until that thread has
+ * @details Combines stopTransmission() to signal the worker thread to
+ *          exit, and joinTransmission() to block until that thread has
  *          fully terminated. After this call returns, no transmission
  *          thread remains running.
  */
-void WsprTransmitter::shutdown_transmitter()
+void WsprTransmitter::shutdownTransmitter()
 {
-    stop_transmission();
-    join_transmission();
+    stopTransmission();
+    joinTransmission();
 }
 
 /**
  * @brief Check if a stop request has been issued.
  *
- * @details Returns true if stop_transmission() was called and the
+ * @details Returns true if stopTransmission() was called and the
  *          internal stop flag is set. Use this to poll from external
  *          loops or helper functions to determine if the transmitter
  *          is in the process of shutting down.
  *
  * @return `true` if a stop has been requested, `false` otherwise.
  */
-bool WsprTransmitter::is_stopping() const noexcept
+bool WsprTransmitter::isStopping() const noexcept
 {
     return stop_requested_.load(std::memory_order_acquire);
 }
@@ -432,7 +432,7 @@ void WsprTransmitter::set_thread_priority()
  * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
  * @throws std::runtime_error if peripherals aren’t mapped.
  */
-void WsprTransmitter::update_dma_for_ppm(double ppm_new)
+void WsprTransmitter::updateDMAForPPM(double ppm_new)
 {
     // Apply the PPM correction to your working PLLD clock.
     dma_config_.plld_clock_frequency =
@@ -461,7 +461,7 @@ void WsprTransmitter::update_dma_for_ppm(double ppm_new)
  *
  * @note This function is idempotent; subsequent calls are no‑ops.
  */
-void WsprTransmitter::dma_cleanup()
+void WsprTransmitter::dmaCleanup()
 {
     // Guard against multiple calls
     static bool cleanup_done = false;
@@ -528,7 +528,7 @@ void WsprTransmitter::dma_cleanup()
  * This function is useful for debugging and verifying that all transmission
  * settings and symbol sequences are correctly populated before transmission.
  */
-void WsprTransmitter::print_parameters()
+void WsprTransmitter::printParameters()
 {
     // General transmission metadata
     std::cout << "Call Sign:         "
@@ -543,7 +543,7 @@ void WsprTransmitter::print_parameters()
 
     std::cout << "GPIO Power:        "
               << std::fixed << std::setprecision(1)
-              << convert_mw_dbm(get_gpio_power_mw(trans_params_.power)) << " dBm" << std::endl;
+              << convertmWDBM(getGPIOPowermW(trans_params_.power)) << " dBm" << std::endl;
 
     std::cout << "WSPR Mode:         "
               << (trans_params_.is_tone ? "N/A" : (trans_params_.wspr_mode == WsprMode::WSPR2 ? "WSPR-2" : "WSPR-15")) << std::endl;
@@ -598,7 +598,7 @@ void WsprTransmitter::print_parameters()
  * @return int   Drive strength in mA.
  * @throws std::out_of_range if level is outside the [0,7] range.
  */
-constexpr int WsprTransmitter::get_gpio_power_mw(int level)
+constexpr int WsprTransmitter::getGPIOPowermW(int level)
 {
     if (level < 0 || level >= static_cast<int>(DRIVE_STRENGTH_TABLE.size()))
     {
@@ -1527,7 +1527,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
  * @return    Power in dBm.
  * @throws    std::domain_error if mw is not positive.
  */
-inline double WsprTransmitter::convert_mw_dbm(double mw)
+inline double WsprTransmitter::convertmWDBM(double mw)
 {
     if (mw <= 0.0)
     {

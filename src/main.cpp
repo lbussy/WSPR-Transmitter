@@ -56,7 +56,7 @@ void pause_for_space()
 {
     extern WsprTransmitter wsprTransmitter;
 
-    while (!wsprTransmitter.is_stopping() && getch() != ' ')
+    while (!wsprTransmitter.isStopping() && getch() != ' ')
         ; // spin until stop or spacebar
 }
 
@@ -91,7 +91,7 @@ void sig_handler(int sig = SIGTERM)
     std::cout << "Caught signal: " << sig << " (" << strsignal(sig) << ")." << std::endl;
     g_stop.store(true);
     std::cout << "Shutting down transmissions." << std::endl;
-    wsprTransmitter.shutdown_transmitter();
+    wsprTransmitter.shutdownTransmitter();
     exit(EXIT_SUCCESS);
 }
 
@@ -114,15 +114,15 @@ int main()
 
     if (isWspr)
     {
-        wsprTransmitter.setup_transmission(7040100.0, 0, config.ppm, "AA0NT", "EM18", 20, true);
+        wsprTransmitter.setupTransmission(7040100.0, 0, config.ppm, "AA0NT", "EM18", 20, true);
     }
     else
     {
-        wsprTransmitter.setup_transmission(7040100.0, 0, config.ppm);
+        wsprTransmitter.setupTransmission(7040100.0, 0, config.ppm);
     }
 
     // Print transmission parameters
-    wsprTransmitter.print_parameters();
+    wsprTransmitter.printParameters();
 
     std::cout << "Setup for " << (isWspr ? "WSPR" : "tone") << " complete." << std::endl;
     if (isWspr)
@@ -143,12 +143,12 @@ int main()
     std::cout << "TX started at: " << timeval_print(&tv_begin) << std::endl;
 
     // Execute transmission
-    wsprTransmitter.start_transmission(SCHED_FIFO, 30);
+    wsprTransmitter.startTransmission(SCHED_FIFO, 30);
 
     if (isWspr)
     {
         // Now wait for the transmit thread to exit:
-        wsprTransmitter.join_transmission();
+        wsprTransmitter.joinTransmission();
     }
     else
     {
@@ -167,9 +167,9 @@ int main()
     // Get adjustments based on PPM
     // config.ppm = get_ppm_from_chronyc();
     // Update with:
-    // update_dma_for_ppm(config.ppm);
+    // updateDMAForPPM(config.ppm);
 
-    wsprTransmitter.shutdown_transmitter();
+    wsprTransmitter.shutdownTransmitter();
 
     return 0;
 }

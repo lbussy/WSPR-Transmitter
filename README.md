@@ -6,7 +6,7 @@ A C++17 class for transmitting WSPR messages or continuous test tones using DMA 
 
 - **WSPR & Test-Tone**: Supports both timed WSPR symbol sequences and indefinite test-tone transmission.
 - **Real-Time Threading**: Runs transmission in a separate `std::thread` with configurable POSIX scheduling policy (`SCHED_FIFO`, `SCHED_RR`, `SCHED_OTHER`) and priority.
-- **Clean Shutdown**: Provides `stop_transmission()`, `join_transmission()`, and `shutdown_transmitter()` for safe, coordinated thread termination.
+- **Clean Shutdown**: Provides `stopTransmission()`, `joinTransmission()`, and `shutdownTransmitter()` for safe, coordinated thread termination.
 - **DMA-Based**: Uses DMA control blocks and PWM clocks for precise timing.
 - **Callback Support**: Optional `on_transmission_complete` callback for event-driven programs.
 
@@ -50,18 +50,18 @@ int main() {
     WsprTransmitter tx;
 
     // Configure for test-tone:
-    tx.setup_transmission(7.040100e6, 0, 12, "", "", 0, false);
+    tx.setupTransmission(7.040100e6, 0, 12, "", "", 0, false);
 
     // Start in real-time thread (FIFO, priority 30)
-    tx.start_transmission(SCHED_FIFO, 30);
+    tx.startTransmission(SCHED_FIFO, 30);
 
     // Wait for user to stop
     std::cout << "Press <space> to stop...";
     pause_for_space();  // interlocks with tx.isStopping()
 
     // Clean shutdown
-    tx.shutdown_transmitter();
-    tx.dma_cleanup();
+    tx.shutdownTransmitter();
+    tx.dmaCleanup();
 
     std::cout << "Transmission stopped." << std::endl;
     return 0;
@@ -70,25 +70,25 @@ int main() {
 
 ## API Reference
 
-### `void setup_transmission(double freq, int tone, int ppm, const std::string &call = "", const std::string &grid = "", int power_dBm = 0, bool isWSPR = false)`
+### `void setupTransmission(double freq, int tone, int ppm, const std::string &call = "", const std::string &grid = "", int power_dBm = 0, bool isWSPR = false)`
 
 Configure frequency, PPM adjustment, power, callsign/grid (for WSPR), and mode.
 
-### `void start_transmission(int policy, int priority)`
+### `void startTransmission(int policy, int priority)`
 
 Launches transmission in a background thread with the given scheduling policy and priority.
 
-### `void stop_transmission()`
+### `void stopTransmission()`
 
 Signals the transmit thread to exit at the next safe point.
 
-### `void join_transmission()`
+### `void joinTransmission()`
 
 Blocks until the background transmission thread has terminated.
 
-### `void shutdown_transmitter()`
+### `void shutdownTransmitter()`
 
-Convenience: calls `stop_transmission()` then `join_transmission()`.
+Convenience: calls `stopTransmission()` then `joinTransmission()`.
 
 ### `bool isStopping() const`
 

@@ -111,7 +111,7 @@ index 402be95..c4cde50 100644
  
  /**
   * @brief Bus address for the General-Purpose Clock 0 Control Register.
-@@ -562,9 +562,9 @@ void start_transmission()
+@@ -562,9 +562,9 @@ void startTransmission()
  {
      // Configure GPIO4 function select (Fsel) to alternate function 0 (GPCLK0).
      // This setting follows Section 6.2 of the ARM Peripherals Manual.

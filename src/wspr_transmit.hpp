@@ -67,7 +67,7 @@ enum class WsprMode
  *   executing Weak Signal Propagation Reporter (WSPR) transmissions on a
  *   Raspberry Pi. It handles:
  *     - Configuration of RF frequency, power level, PPM calibration, and message
- *       parameters via setup_transmission().
+ *       parameters via setupTransmission().
  *     - Low‑level mailbox allocation, peripheral memory mapping, and DMA/PWM
  *       initialization for precise symbol timing.
  *     - Start/stop of transmission loops (tone mode or symbol mode) with
@@ -86,7 +86,7 @@ public:
      * @brief Constructs a WSPR transmitter with default settings.
      *
      * This is for global constructions, parameters are set via
-     * setup_transmission().
+     * setupTransmission().
      */
     WsprTransmitter();
 
@@ -116,7 +116,7 @@ public:
      *
      * @param cb  A callable with signature `void()`.  If empty, no callback.
      */
-    void set_wspr_complete_callback(CompletionCallback cb) noexcept
+    void setWSPRCompleteCallback(CompletionCallback cb) noexcept
     {
         on_wspr_complete_ = std::move(cb);
     }
@@ -133,7 +133,7 @@ public:
      * @param[in] priority The thread priority (1–99 for real‑time policies;
      *                     ignored by SCHED_OTHER).
      */
-    void start_transmission(int policy = SCHED_FIFO, int priority = 30);
+    void startTransmission(int policy = SCHED_FIFO, int priority = 30);
 
     /**
      * @brief Request an in‑flight transmission to stop.
@@ -142,39 +142,39 @@ public:
      *          thread will exit at the next interruption point. Notifies any
      *          condition_variable waits to unblock the thread promptly.
      */
-    void stop_transmission();
+    void stopTransmission();
 
     /**
      * @brief Waits for the background transmission thread to finish.
      *
      * @details If the transmission thread was launched via
-     *          start_transmission(), this call will block until
+     *          startTransmission(), this call will block until
      *          that thread has completed and joined. After returning,
      *          tx_thread_ is no longer joinable.
      */
-    void join_transmission();
+    void joinTransmission();
 
     /**
      * @brief Gracefully stops and waits for the transmission thread.
      *
-     * @details Combines stop_transmission() to signal the worker thread to
-     *          exit, and join_transmission() to block until that thread has
+     * @details Combines stopTransmission() to signal the worker thread to
+     *          exit, and joinTransmission() to block until that thread has
      *          fully terminated. After this call returns, no transmission
      *          thread remains running.
      */
-    void shutdown_transmitter();
+    void shutdownTransmitter();
 
     /**
      * @brief Check if a stop request has been issued.
      *
-     * @details Returns true if stop_transmission() was called and the
+     * @details Returns true if stopTransmission() was called and the
      *          internal stop flag is set. Use this to poll from external
      *          loops or helper functions to determine if the transmitter
      *          is in the process of shutting down.
      *
      * @return `true` if a stop has been requested, `false` otherwise.
      */
-    bool is_stopping() const noexcept;
+    bool isStopping() const noexcept;
 
     /**
      * @brief Configure and start a WSPR transmission.
@@ -199,7 +199,7 @@ public:
      *
      * @throws std::runtime_error if DMA setup or mailbox operations fail.
      */
-    void setup_transmission(
+    void setupTransmission(
         double frequency,
         int power = 0,
         double ppm = 0.0,
@@ -230,7 +230,7 @@ public:
      * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
      * @throws std::runtime_error if peripherals aren’t mapped.
      */
-    void update_dma_for_ppm(double ppm_new);
+    void updateDMAForPPM(double ppm_new);
 
     /**
      * @brief Clean up DMA and mailbox resources.
@@ -248,7 +248,7 @@ public:
      *
      * @note This function is idempotent; subsequent calls are no‑ops.
      */
-    void dma_cleanup();
+    void dmaCleanup();
 
     /**
      * @brief Prints current transmission parameters and encoded WSPR symbols.
@@ -260,7 +260,7 @@ public:
      * This function is useful for debugging and verifying that all transmission
      * settings and symbol sequences are correctly populated before transmission.
      */
-    void print_parameters();
+    void printParameters();
 
     /**
      * @brief Get the GPIO drive strength in milliamps.
@@ -272,7 +272,7 @@ public:
      * @return int   Drive strength in mA.
      * @throws std::out_of_range if level is outside the [0,7] range.
      */
-    constexpr int get_gpio_power_mw(int level);
+    constexpr int getGPIOPowermW(int level);
 
     /**
      * @brief Convert power in milliwatts to decibels referenced to 1 mW (dBm).
@@ -281,13 +281,13 @@ public:
      * @return    Power in dBm.
      * @throws    std::domain_error if mw is not positive.
      */
-    inline double convert_mw_dbm(double mw);
+    inline double convertmWDBM(double mw);
 
 private:
     /**
      * @brief Callback invoked upon completion of a WSPR transmission.
      *
-     * @details If set via set_wspr_complete_callback(), this callable is executed
+     * @details If set via setWSPRCompleteCallback(), this callable is executed
      *          on the transmission thread immediately after the last WSPR symbol
      *          has been sent and before the DMA/PWM is shut down. If no callback
      *          is provided, this remains empty and no notification occurs.
@@ -297,8 +297,8 @@ private:
     /**
      * @brief Background thread for carrying out the transmission.
      *
-     * Launched by start_transmission() and joined by
-     * join_transmission().
+     * Launched by startTransmission() and joined by
+     * joinTransmission().
      */
     std::thread tx_thread_;
 
@@ -328,7 +328,7 @@ private:
     /**
      * @brief Condition variable used to wake the transmission thread.
      *
-     * stop_transmission() calls notify_all() on this to unblock
+     * stopTransmission() calls notify_all() on this to unblock
      * any waits so the thread can observe stop_requested_.
      */
     std::condition_variable stop_cv_;
@@ -817,7 +817,7 @@ private:
      *   - 6 → 14 mA
      *   - 7 → 16 mA
      *
-     * @note This table is used internally by get_gpio_power_mw() and is not exposed
+     * @note This table is used internally by getGPIOPowermW() and is not exposed
      *       in the public interface unless declared in a header.
      */
     static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
