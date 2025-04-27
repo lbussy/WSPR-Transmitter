@@ -1065,7 +1065,7 @@ private:
      * @brief Entry point for the background transmission thread.
      *
      * @details Applies the configured POSIX scheduling policy and priority
-     *          (via set_thread_priority()), then invokes transmit() to carry
+     *          (via setThreadPriority()), then invokes transmit() to carry
      *          out the actual transmission work. This method runs inside the
      *          new thread and returns only when transmit() completes or a
      *          stop request is observed.
@@ -1079,7 +1079,7 @@ private:
      *          pthread_setschedparam() with thread_policy_ on the current thread.
      *          If the call fails, writes a warning to stderr with the error message.
      */
-    void set_thread_priority();
+    void setThreadPriority();
 };
 
 extern WsprTransmitter wsprTransmitter;

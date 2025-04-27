@@ -393,7 +393,7 @@ bool WsprTransmitter::isStopping() const noexcept
  * @brief Entry point for the background transmission thread.
  *
  * @details Applies the configured POSIX scheduling policy and priority
- *          (via set_thread_priority()), then invokes transmit() to carry
+ *          (via setThreadPriority()), then invokes transmit() to carry
  *          out the actual transmission work. This method runs inside the
  *          new thread and returns only when transmit() completes or a
  *          stop request is observed.
@@ -401,7 +401,7 @@ bool WsprTransmitter::isStopping() const noexcept
 void WsprTransmitter::thread_entry()
 {
     // bump our own scheduling parameters first:
-    set_thread_priority();
+    setThreadPriority();
     // actually do the work (blocking until complete or stop_requested_)
     transmit();
 }
@@ -413,7 +413,7 @@ void WsprTransmitter::thread_entry()
  *          pthread_setschedparam() with thread_policy_ on the current thread.
  *          If the call fails, writes a warning to stderr with the error message.
  */
-void WsprTransmitter::set_thread_priority()
+void WsprTransmitter::setThreadPriority()
 {
     // Only real‑time policies use priority > 0
     sched_param sch{};
