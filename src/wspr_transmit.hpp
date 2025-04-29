@@ -55,7 +55,7 @@
 enum class WsprMode
 {
     WSPR2, ///< WSPR transmission mode
-    WSPR15  ///< Test tone generation mode
+    WSPR15 ///< Test tone generation mode
 };
 
 /**
@@ -116,7 +116,7 @@ public:
      *
      * @param cb  A callable with signature `void()`.  If empty, no callback.
      */
-    void setWSPRCompleteCallback(CompletionCallback cb) noexcept
+    void setWSPRCompleteCallback(CompletionCallback cb)
     {
         on_wspr_complete_ = std::move(cb);
     }
@@ -175,6 +175,16 @@ public:
      * @return `true` if a stop has been requested, `false` otherwise.
      */
     bool isStopping() const noexcept;
+
+    /**
+     * @brief Check if the GPIO is bound to the clock.
+     *
+     * @details Returns a value indicating if the system is transmitting
+     * in any way,
+     *
+     * @return `true` if clock is engaged, `false` otherwise.
+     */
+    bool isTransmitting() const noexcept;
 
     /**
      * @brief Configure and start a WSPR transmission.
@@ -334,6 +344,14 @@ private:
     std::condition_variable stop_cv_;
 
     /**
+     * @brief Bool used to store transmission state.
+     *
+     * True when transmit_on() is called, false when transmit_off() or
+     * disable_clock() is called.
+     */
+    std::atomic<bool> transmit_on_{false};
+
+    /**
      * @brief Mutex accompanying stop_cv_ for coordinated waits.
      */
     std::mutex stop_mutex_;
@@ -491,6 +509,13 @@ private:
     struct DMAConfig dma_config_;
 
     /**
+     * @brief Global dma setup semaphore.
+     *
+     * Shows if setup_dma() been run and not yet torn down.
+     */
+    bool dma_setup_done_{false};
+
+    /**
      * @brief Global mailbox structure for Broadcom mailbox communication.
      *
      * This static structure stores information related to the Broadcom mailbox interface,
@@ -513,12 +538,12 @@ private:
      */
     struct Mailbox
     {
-        int handle;                         ///< Mailbox handle from mbox_open().
-        unsigned mem_ref = 0;               ///< Memory reference from mem_alloc().
-        unsigned bus_addr;                  ///< Bus address from mem_lock().
-        unsigned char *virt_addr = nullptr; ///< Virtual address from mapmem().
-        unsigned pool_size;                 ///< Total number of pages in the memory pool.
-        unsigned pool_cnt;                  ///< Count of allocated pages from the pool.
+        int handle = -1;       ///< mailbox fd
+        unsigned mem_ref = 0;  ///< mem_alloc()
+        unsigned bus_addr = 0; ///< mem_lock()
+        unsigned char *virt_addr = nullptr;
+        unsigned pool_size = 0; ///< total DMA pages
+        unsigned pool_cnt = 0;  ///< pages handed out
     };
 
     /**
@@ -1065,7 +1090,7 @@ private:
      * @brief Entry point for the background transmission thread.
      *
      * @details Applies the configured POSIX scheduling policy and priority
-     *          (via setThreadPriority()), then invokes transmit() to carry
+     *          (via set_thread_priority()), then invokes transmit() to carry
      *          out the actual transmission work. This method runs inside the
      *          new thread and returns only when transmit() completes or a
      *          stop request is observed.
@@ -1079,7 +1104,7 @@ private:
      *          pthread_setschedparam() with thread_policy_ on the current thread.
      *          If the call fails, writes a warning to stderr with the error message.
      */
-    void setThreadPriority();
+    void set_thread_priority();
 };
 
 extern WsprTransmitter wsprTransmitter;

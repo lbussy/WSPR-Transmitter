@@ -86,9 +86,7 @@ WsprTransmitter wsprTransmitter;
  * are configured later via setupTransmission(). This constructor does not
  * allocate hardware resources or initiate any transmissions.
  */
-WsprTransmitter::WsprTransmitter()
-{
-}
+WsprTransmitter::WsprTransmitter() = default;
 
 /**
  * @brief Destructor for the WSPR transmitter.
@@ -135,6 +133,18 @@ void WsprTransmitter::setupTransmission(
     int power_dbm,
     bool use_offset)
 {
+    // If we’ve already got DMA up, tear down the old run
+    if (dma_setup_done_)
+    {
+        stopTransmission();        // tell the worker to stop
+        if (tx_thread_.joinable()) // wait for it to actually exit
+            tx_thread_.join();
+        dmaCleanup(); // now unmap/free everything
+    }
+
+    // Clear the stop flag so the next thread can run
+    stop_requested_.store(false);
+
     // Set transmission parameters
     trans_params_.call_sign = call_sign;
     trans_params_.grid_square = grid_square;
@@ -228,7 +238,7 @@ void WsprTransmitter::setupTransmission(
  */
 void WsprTransmitter::transmit()
 {
-    // 1) Early exit if a stop was already requested
+    // Early exit if a stop was already requested
     if (stop_requested_.load())
     {
         if (debug)
@@ -238,17 +248,17 @@ void WsprTransmitter::transmit()
         return;
     }
 
-    // 2) Record reference time for scheduling
+    // Record reference time for scheduling
     struct timeval tv_begin{};
     gettimeofday(&tv_begin, nullptr);
 
-    // 3) Initialize DMA buffer index
+    // Initialize DMA buffer index
     int bufPtr = 0;
 
-    // 4) Enable PWM clock and DMA transmission
+    // Enable PWM clock and DMA transmission
     transmit_on();
 
-    // 5) Choose tone vs WSPR
+    // Choose tone vs WSPR
     if (trans_params_.is_tone)
     {
         // Continuous tone loop — exit as soon as stop_requested_ is true
@@ -390,10 +400,23 @@ bool WsprTransmitter::isStopping() const noexcept
 }
 
 /**
+ * @brief Check if the GPIO is bound to the clock.
+ *
+ * @details Returns a value indicating if the system is transmitting
+ * in any way,
+ *
+ * @return `true` if clock is engaged, `false` otherwise.
+ */
+bool WsprTransmitter::isTransmitting() const noexcept
+{
+    return transmit_on_.load(std::memory_order_acquire);
+}
+
+/**
  * @brief Entry point for the background transmission thread.
  *
  * @details Applies the configured POSIX scheduling policy and priority
- *          (via setThreadPriority()), then invokes transmit() to carry
+ *          (via set_thread_priority()), then invokes transmit() to carry
  *          out the actual transmission work. This method runs inside the
  *          new thread and returns only when transmit() completes or a
  *          stop request is observed.
@@ -401,7 +424,7 @@ bool WsprTransmitter::isStopping() const noexcept
 void WsprTransmitter::thread_entry()
 {
     // bump our own scheduling parameters first:
-    setThreadPriority();
+    set_thread_priority();
     // actually do the work (blocking until complete or stop_requested_)
     transmit();
 }
@@ -413,7 +436,7 @@ void WsprTransmitter::thread_entry()
  *          pthread_setschedparam() with thread_policy_ on the current thread.
  *          If the call fails, writes a warning to stderr with the error message.
  */
-void WsprTransmitter::setThreadPriority()
+void WsprTransmitter::set_thread_priority()
 {
     // Only real‑time policies use priority > 0
     sched_param sch{};
@@ -463,13 +486,12 @@ void WsprTransmitter::updateDMAForPPM(double ppm_new)
  */
 void WsprTransmitter::dmaCleanup()
 {
-    // Guard against multiple calls
-    static bool cleanup_done = false;
-    if (cleanup_done)
+    // Only clean up if we have something to tear down
+    if (!dma_setup_done_)
     {
         return;
     }
-    cleanup_done = true;
+    dma_setup_done_ = false;
 
     // If we never mapped the peripherals, nothing to tear down:
     if (!dma_config_.peripheral_base_virtual)
@@ -513,8 +535,8 @@ void WsprTransmitter::dmaCleanup()
     safe_remove();
 
     // Reset global configuration structures to defaults
-    dma_config_ = {};
-    mailbox_ = {};
+    dma_config_ = DMAConfig(); // Uses your in-class initializers
+    mailbox_ = Mailbox();      // Uses your in-class initializers
 }
 
 /**
@@ -982,6 +1004,9 @@ void WsprTransmitter::deallocate_memory_pool()
  */
 void WsprTransmitter::disable_clock()
 {
+    // Set semaphore
+    transmit_on_.store(false);
+
     // Ensure memory-mapped peripherals are initialized before proceeding.
     if (dma_config_.peripheral_base_virtual == nullptr)
     {
@@ -1029,6 +1054,9 @@ void WsprTransmitter::transmit_on()
 
     // Apply clock control settings.
     access_bus_address(CM_GP0CTL_BUS) = temp;
+
+    // Set semaphore
+    transmit_on_.store(true);
 }
 
 /**
@@ -1445,6 +1473,9 @@ void WsprTransmitter::setup_dma()
 
     // Allocate memory pages and build DMA control blocks
     create_dma_pages(const_page_, instr_page_, instructions_);
+
+    // Flag setup as done
+    dma_setup_done_ = true;
 }
 
 /**
@@ -1468,11 +1499,14 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
     if (std::floor(div_lo) != std::floor(div_hi))
     {
         center_freq_actual = dma_config_.plld_clock_frequency / std::floor(div_lo) - 1.6 * trans_params_.tone_spacing;
-        std::stringstream temp;
-        temp << std::fixed << std::setprecision(6)
-             << "Warning: center frequency has been changed to "
-             << center_freq_actual / 1e6 << " MHz";
-        std::cerr << temp.str() << " because of hardware limitations." << std::endl;
+        if (debug)
+        {
+            std::stringstream temp;
+            temp << std::fixed << std::setprecision(6)
+                 << "Warning: center frequency has been changed to "
+                 << center_freq_actual / 1e6 << " MHz";
+            std::cerr << temp.str() << " because of hardware limitations." << std::endl;
+        }
     }
 
     // Initialize tuning word table.
