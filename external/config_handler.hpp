@@ -1,92 +1,90 @@
-#ifndef _CONFIG_HANDLER_HPP
-#define _CONFIG_HANDLER_HPP
+// config_handler.hpp
+#ifndef CONFIG_HANDLER_HPP
+#define CONFIG_HANDLER_HPP
 
 #include <string>
 #include <vector>
 
 /**
- * @brief Global configuration instance for argument parsing and runtime settings.
+ * @brief Holds all command-line and runtime configuration data.
  *
  * @details
- * Holds all command-line and runtime configuration data not managed directly
- * by the INI file system. Initialized globally and used throughout the application.
- *
- * @see ArgParserConfig, ini, iniMonitor
+ * This struct is populated from command-line arguments or an INI file,
+ * and then accessed throughout the application.
  */
 struct ArgParserConfig
 {
-    // Control
-    bool transmit; ///< Transmission mode enabled.
+    /** @brief Enable or disable transmission mode. */
+    bool transmit = false;
 
-    // Common
-    std::string callsign;    ///< WSPR callsign.
-    std::string grid_square; ///< 4- or 6-character Maidenhead locator.
-    int power_dbm;           ///< Transmit power in dBm.
-    std::string frequencies; ///< Comma-separated frequency list.
-    int tx_pin;              ///< GPIO pin number for RF transmit control.
+    /** @brief WSPR callsign (e.g. "AA0NT"). */
+    std::string callsign;
 
-    // Extended
-    double ppm;      ///< PPM frequency calibration.
-    bool use_ntp;    ///< Apply NTP-based frequency correction.
-    bool use_offset; ///< Enable random frequency offset.
-    int power_level; ///< Power level for RF hardware (0–7).
-    bool use_led;    ///< Enable TX LED indicator.
-    int led_pin;     ///< GPIO pin for LED indicator.
+    /** @brief Maidenhead grid locator (4 or 6 chars). */
+    std::string grid_square;
 
-    // Server
-    int web_port;      ///< Web server port number.
-    int socket_port;   ///< Socket server port number.
-    bool use_shutdown; ///< Enable GPIO-based shutdown feature.
-    int shutdown_pin;  ///< GPIO pin used to signal shutdown.
+    /** @brief Transmit power in dBm. */
+    int power_dbm = 0;
 
-    // Command line only
-    bool date_time_log; ///< Prefix logs with timestamp.
-    bool loop_tx;       ///< Repeat transmission cycle.
-    int tx_iterations;  ///< Number of transmission iterations (0 = infinite).
-    double test_tone;   ///< Enable continuous tone mode (in Hz).
+    /** @brief Comma-separated list of frequencies (Hz). */
+    std::string frequencies;
 
-    // Runtime variables
-    bool use_ini;                        ///< Load configuration from INI file.
-    std::string ini_filename;            ///< INI file name and path.
-    std::vector<double> center_freq_set; ///< Parsed list of center frequencies in Hz.
+    /** @brief GPIO pin number used for RF transmit control. */
+    int tx_pin = -1;
 
-    /**
-     * @brief Default constructor initializing all configuration parameters.
-     */
-    ArgParserConfig()
-        : transmit(false),
-          callsign(""),
-          grid_square(""),
-          power_dbm(0),
-          frequencies(""),
-          tx_pin(-1),
-          ppm(0.0),
-          use_ntp(false),
-          use_offset(false),
-          power_level(7),
-          use_led(false),
-          led_pin(-1),
-          web_port(-1),
-          socket_port(-1),
-          use_shutdown(false),
-          shutdown_pin(-1),
-          date_time_log(false),
-          loop_tx(false),
-          tx_iterations(0),
-          test_tone(0.0),
-          use_ini(false),
-          ini_filename(""),
-          center_freq_set({})
-    {
-    }
+    /** @brief PPM frequency calibration (e.g. +11.135). */
+    double ppm = 0.0;
+
+    /** @brief Apply NTP-based frequency correction. */
+    bool use_ntp = false;
+
+    /** @brief Apply a small random frequency offset. */
+    bool use_offset = false;
+
+    /** @brief Power level for RF hardware (0–7). */
+    int power_level = 7;
+
+    /** @brief Enable the TX LED indicator. */
+    bool use_led = false;
+
+    /** @brief GPIO pin used by the LED indicator. */
+    int led_pin = -1;
+
+    /** @brief Web server listening port. */
+    int web_port = -1;
+
+    /** @brief Socket server listening port. */
+    int socket_port = -1;
+
+    /** @brief Enable GPIO-based shutdown feature. */
+    bool use_shutdown = false;
+
+    /** @brief GPIO pin used to signal shutdown. */
+    int shutdown_pin = -1;
+
+    /** @brief Prefix logs with date/time. */
+    bool date_time_log = false;
+
+    /** @brief Loop transmission continuously (infinite if true). */
+    bool loop_tx = false;
+
+    /** @brief Number of transmission iterations (0=infinite). */
+    int tx_iterations = 0;
+
+    /** @brief Continuous test‐tone frequency in Hz (0=disabled). */
+    double test_tone = 0.0;
+
+    /** @brief Load configuration from an INI file. */
+    bool use_ini = false;
+
+    /** @brief Path to the INI configuration file. */
+    std::string ini_filename;
+
+    /** @brief Parsed list of center frequencies (Hz). */
+    std::vector<double> center_freq_set;
 };
 
-/**
- * @brief Global configuration object.
- *
- * This ArgParserConfig instance holds the application’s configuration settings,
- * typically loaded from an INI file or a JSON configuration.
- */
+/** @brief Global configuration instance. */
 extern ArgParserConfig config;
 
-#endif // _CONFIG_HANDLER_HPP
+#endif // CONFIG_HANDLER_HPP

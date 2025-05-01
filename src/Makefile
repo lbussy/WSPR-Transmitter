@@ -9,6 +9,7 @@ SUDO := sudo
 # Add any required submodules by their src path
 SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Message/src)
 SUBMODULE_SRCDIRS += $(wildcard ../../Broadcom-Mailbox/src)
+SUBMODULE_SRCDIRS += $(wildcard ../external)
 
 # Get project name from Git, revert to directory name
 #
@@ -94,7 +95,6 @@ CXXFLAGS := -Wno-psabi -lstdc++fs -std=c++$(CXXVER)
 CXXFLAGS += $(COMMON_FLAGS) $(COMM_CXX_FLAGS)
 
 # Include paths
-CXXFLAGS += -I$(abspath ../external)
 CXXFLAGS += -I$(abspath .)
 CXXFLAGS += $(foreach dir,$(SUBMODULE_SRCDIRS),-I$(abspath $(dir)))
 
