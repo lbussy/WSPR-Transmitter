@@ -97,8 +97,7 @@ WsprTransmitter::WsprTransmitter() = default;
  */
 WsprTransmitter::~WsprTransmitter()
 {
-    // Cleanup all DMA setup and memory regions
-    dmaCleanup();
+    shutdownTransmitter();
 }
 
 /**
@@ -273,6 +272,9 @@ void WsprTransmitter::transmit()
     }
     else
     {
+        /// Do callback if set
+        if (on_transmit_start_)
+            on_transmit_start_();
         // Transmit each symbol in the WSPR message
         const int symbol_count =
             static_cast<int>(trans_params_.symbols.size());
@@ -307,10 +309,8 @@ void WsprTransmitter::transmit()
         }
 
         // Invoke the completion callback if set
-        if (on_wspr_complete_)
-        {
-            on_wspr_complete_();
-        }
+        if (on_transmit_end_)
+            on_transmit_end_();
     }
 
     // Disable PWM clock and stop transmission
@@ -329,10 +329,8 @@ void WsprTransmitter::transmit()
  * @param[in] priority The thread priority (1–99 for real‑time policies;
  *                     ignored by SCHED_OTHER).
  */
-void WsprTransmitter::startTransmission(int policy, int priority)
+void WsprTransmitter::startTransmission()
 {
-    thread_policy_ = policy;
-    thread_priority_ = priority;
     stop_requested_.store(false);
 
     // Launch the background thread:
@@ -352,6 +350,43 @@ void WsprTransmitter::stopTransmission()
     stop_requested_.store(true);
     // Unblock any waits
     stop_cv_.notify_all();
+}
+
+/**
+ * @brief Install optional callbacks for transmission start/end.
+ *
+ * @param[in] start_cb
+ *   Called on the transmit thread immediately before the first symbol
+ *   (or tone) is emitted.  If null, no start notification is made.
+ * @param[in] end_cb
+ *   Called on the transmit thread immediately after the last WSPR
+ *   symbol is sent (but before DMA/PWM are torn down).  If null,
+ *   no completion notification is made.
+ */
+void WsprTransmitter::setTransmissionCallbacks(CompletionCallback start_cb,
+                                               CompletionCallback end_cb)
+{
+    on_transmit_start_ = std::move(start_cb);
+    on_transmit_end_ = std::move(end_cb);
+}
+
+/**
+ * @brief Configure POSIX scheduling policy & priority for future transmissions.
+ *
+ * @details
+ *   This must be called _before_ `startTransmission()` if you need real-time
+ *   scheduling.  The next call to `startTransmission()` will launch its thread
+ *   under the given policy/priority.
+ *
+ * @param[in] policy
+ *   One of the standard POSIX policies (e.g. SCHED_FIFO, SCHED_RR, SCHED_OTHER).
+ * @param[in] priority
+ *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
+ */
+void WsprTransmitter::setThreadScheduling(int policy, int priority)
+{
+    thread_policy_   = policy;
+    thread_priority_ = priority;
 }
 
 /**
@@ -382,6 +417,7 @@ void WsprTransmitter::shutdownTransmitter()
 {
     stopTransmission();
     joinTransmission();
+    dmaCleanup();
 }
 
 /**

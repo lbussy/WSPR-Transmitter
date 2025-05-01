@@ -99,8 +99,6 @@ public:
     ~WsprTransmitter();
 
     /**
-     * @brief Callback signature for transmission completion notifications.
-     *
      * @details Defines the function prototype for user‑provided callbacks that
      *          are called when a WSPR transmission completes. The callback
      *          takes no parameters and returns nothing.
@@ -108,32 +106,44 @@ public:
     using CompletionCallback = std::function<void()>;
 
     /**
-     * @brief Set a callback to be invoked when a WSPR transmission completes.
-     *
-     * @details If the transmitter is in WSPR mode (not tone), then immediately
-     *          after the last symbol is sent (but before `transmit_off()`),
-     *          this callback will be called—on the transmit thread.
-     *
-     * @param cb  A callable with signature `void()`.  If empty, no callback.
-     */
-    void setWSPRCompleteCallback(CompletionCallback cb)
-    {
-        on_wspr_complete_ = std::move(cb);
-    }
-
-    /**
      * @brief Starts the transmission in a dedicated thread.
      *
-     * Configures the thread scheduling policy and priority, clears any previous
-     * stop request, and then launches the background thread which will run
-     * `thread_entry()` (and ultimately `transmit()`).
-     *
-     * @param[in] policy   The POSIX scheduling policy (e.g., SCHED_FIFO, SCHED_RR,
-     *                     or SCHED_OTHER).
-     * @param[in] priority The thread priority (1–99 for real‑time policies;
-     *                     ignored by SCHED_OTHER).
+     * @details
+     *   Clears any previous stop request, then launches the background thread
+     *   which will run `thread_entry()` (and ultimately `transmit()`).  Any
+     *   POSIX scheduling policy & priority must be set beforehand via
+     *   `configureThreadScheduling()`.
      */
-    void startTransmission(int policy = SCHED_FIFO, int priority = 30);
+    void startTransmission();
+
+    /**
+     * @brief Install optional callbacks for transmission start/end.
+     *
+     * @param[in] start_cb
+     *   Called on the transmit thread immediately before the first symbol
+     *   (or tone) is emitted.  If null, no start notification is made.
+     * @param[in] end_cb
+     *   Called on the transmit thread immediately after the last WSPR
+     *   symbol is sent (but before DMA/PWM are torn down).  If null,
+     *   no completion notification is made.
+     */
+    void setTransmissionCallbacks(CompletionCallback start_cb = {},
+                                  CompletionCallback end_cb = {});
+
+    /**
+     * @brief Configure POSIX scheduling policy & priority for future transmissions.
+     *
+     * @details
+     *   This must be called _before_ `startTransmission()` if you need real-time
+     *   scheduling.  The next call to `startTransmission()` will launch its thread
+     *   under the given policy/priority.
+     *
+     * @param[in] policy
+     *   One of the standard POSIX policies (e.g. SCHED_FIFO, SCHED_RR, SCHED_OTHER).
+     * @param[in] priority
+     *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
+     */
+    void setThreadScheduling(int policy, int priority);
 
     /**
      * @brief Request an in‑flight transmission to stop.
@@ -294,15 +304,10 @@ public:
     inline double convertmWDBM(double mw);
 
 private:
-    /**
-     * @brief Callback invoked upon completion of a WSPR transmission.
-     *
-     * @details If set via setWSPRCompleteCallback(), this callable is executed
-     *          on the transmission thread immediately after the last WSPR symbol
-     *          has been sent and before the DMA/PWM is shut down. If no callback
-     *          is provided, this remains empty and no notification occurs.
-     */
-    CompletionCallback on_wspr_complete_{};
+    /// Invoked just before each transmission begins (tone or WSPR).
+    CompletionCallback on_transmit_start_{};
+    /// Invoked just after WSPR symbols complete (before shutdown).
+    CompletionCallback on_transmit_end_{};
 
     /**
      * @brief Background thread for carrying out the transmission.

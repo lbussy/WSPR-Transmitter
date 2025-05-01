@@ -87,6 +87,16 @@ void sig_handler(int sig = SIGTERM)
     exit(EXIT_SUCCESS);
 }
 
+void start_cb()
+{
+    std::cout << "[CALLBACK] Started transmission." << std::endl;
+}
+
+void end_cb()
+{
+    std::cout << "[CALLBACK] Completed transmission." << std::endl;
+}
+
 int main()
 {
     std::array<int, 6> signals = {SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT};
@@ -104,8 +114,11 @@ int main()
     // Get adjustments based on PPM
     config.ppm = get_ppm_from_chronyc();
 
+    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 30);
+
     if (isWspr)
     {
+        wsprTransmitter.setTransmissionCallbacks(start_cb, end_cb);
         wsprTransmitter.setupTransmission(7040100.0, 0, config.ppm, "AA0NT", "EM18", 20, true);
     }
     else
@@ -135,7 +148,7 @@ int main()
     std::cout << "TX started at: " << timeval_print(&tv_begin) << std::endl;
 
     // Execute transmission
-    wsprTransmitter.startTransmission(SCHED_FIFO, 30);
+    wsprTransmitter.startTransmission();
 
     if (isWspr)
     {
@@ -155,11 +168,6 @@ int main()
     std::cout << "TX ended at: " << timeval_print(&tv_end)
               << " (" << tv_diff.tv_sec << "." << std::setfill('0') << std::setw(3)
               << (tv_diff.tv_usec + 500) / 1000 << " seconds)" << std::endl;
-
-    // Get adjustments based on PPM
-    // config.ppm = get_ppm_from_chronyc();
-    // Update with:
-    // updateDMAForPPM(config.ppm);
 
     wsprTransmitter.shutdownTransmitter();
 
