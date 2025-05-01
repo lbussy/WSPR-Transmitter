@@ -318,26 +318,6 @@ void WsprTransmitter::transmit()
 }
 
 /**
- * @brief Starts the transmission in a dedicated thread.
- *
- * Configures the thread scheduling policy and priority, clears any previous
- * stop request, and then launches the background thread which will run
- * `thread_entry()` (and ultimately `transmit()`).
- *
- * @param[in] policy   The POSIX scheduling policy (e.g., SCHED_FIFO, SCHED_RR,
- *                     or SCHED_OTHER).
- * @param[in] priority The thread priority (1–99 for real‑time policies;
- *                     ignored by SCHED_OTHER).
- */
-void WsprTransmitter::startTransmission()
-{
-    stop_requested_.store(false);
-
-    // Launch the background thread:
-    tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
-}
-
-/**
  * @brief Request an in‑flight transmission to stop.
  *
  * @details Sets the internal stop flag so that ongoing loops in the transmit
@@ -387,6 +367,22 @@ void WsprTransmitter::setThreadScheduling(int policy, int priority)
 {
     thread_policy_   = policy;
     thread_priority_ = priority;
+}
+
+void WsprTransmitter::enableTransmission() {
+    // Any in-flight tx should be clear
+    stop_requested_.store(false, std::memory_order_release);
+    scheduler_.start();
+}
+
+void WsprTransmitter::disableTransmission() {
+    // Atop scheduling further windows
+    scheduler_.stop();
+    // if a transmit thread is running, signal & join it too
+    stop_requested_.store(true, std::memory_order_release);
+    stop_cv_.notify_all();
+    if (tx_thread_.joinable())
+        tx_thread_.join();
 }
 
 /**

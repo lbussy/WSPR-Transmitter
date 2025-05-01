@@ -21,6 +21,11 @@
 #include <termios.h>
 #include <sys/select.h>
 
+// at file scope
+static std::mutex g_end_mtx;
+static std::condition_variable g_end_cv;
+static bool g_transmission_done = false;
+
 /**
  * @brief Reads a single character from standard input without waiting for Enter.
  *
@@ -81,7 +86,6 @@ void sig_handler(int sig = SIGTERM)
 {
     // Called when exiting or when a signal is received.
     std::cout << "Caught signal: " << sig << " (" << strsignal(sig) << ")." << std::endl;
-    g_stop.store(true);
     std::cout << "Shutting down transmissions." << std::endl;
     wsprTransmitter.shutdownTransmitter();
     exit(EXIT_SUCCESS);
@@ -95,6 +99,11 @@ void start_cb()
 void end_cb()
 {
     std::cout << "[CALLBACK] Completed transmission." << std::endl;
+    {
+        std::lock_guard<std::mutex> lk(g_end_mtx);
+        g_transmission_done = true;
+    }
+    g_end_cv.notify_one();
 }
 
 int main()
@@ -132,9 +141,7 @@ int main()
     std::cout << "Setup for " << (isWspr ? "WSPR" : "tone") << " complete." << std::endl;
     if (isWspr)
     {
-        std::cout << "Waiting for next transmission window." << std::endl;
-        std::cout << "Press <spacebar> to start immediately." << std::endl;
-        wait_for_trans_window();
+        ;
     }
     else
     {
@@ -142,18 +149,16 @@ int main()
         pause_for_space();
     }
 
-    // Time structs for computing transmission window
-    struct timeval tv_begin, tv_end, tv_diff;
-    gettimeofday(&tv_begin, NULL);
-    std::cout << "TX started at: " << timeval_print(&tv_begin) << std::endl;
-
     // Execute transmission
-    wsprTransmitter.startTransmission();
+    wsprTransmitter.enableTransmission();
 
     if (isWspr)
     {
-        // Now wait for the transmit thread to exit:
-        wsprTransmitter.joinTransmission();
+        std::cout << "Waiting for end of WSPR transmission (press space to abort)..." << std::endl;
+        std::unique_lock<std::mutex> lk(g_end_mtx);
+        // this will block until end_cb() sets g_transmission_done == true
+        g_end_cv.wait(lk, []{ return g_transmission_done; });
+        std::cout << "WSPR transmission complete." << std::endl;
     }
     else
     {
@@ -161,13 +166,6 @@ int main()
         pause_for_space(); // Or some other user action
         std::cout << "Stopping." << std::endl;
     }
-
-    // Print transmission timestamp and duration
-    gettimeofday(&tv_end, nullptr);
-    timeval_subtract(&tv_diff, &tv_end, &tv_begin);
-    std::cout << "TX ended at: " << timeval_print(&tv_end)
-              << " (" << tv_diff.tv_sec << "." << std::setfill('0') << std::setw(3)
-              << (tv_diff.tv_usec + 500) / 1000 << " seconds)" << std::endl;
 
     wsprTransmitter.shutdownTransmitter();
 

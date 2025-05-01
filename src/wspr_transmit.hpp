@@ -106,17 +106,6 @@ public:
     using CompletionCallback = std::function<void()>;
 
     /**
-     * @brief Starts the transmission in a dedicated thread.
-     *
-     * @details
-     *   Clears any previous stop request, then launches the background thread
-     *   which will run `thread_entry()` (and ultimately `transmit()`).  Any
-     *   POSIX scheduling policy & priority must be set beforehand via
-     *   `configureThreadScheduling()`.
-     */
-    void startTransmission();
-
-    /**
      * @brief Install optional callbacks for transmission start/end.
      *
      * @param[in] start_cb
@@ -144,6 +133,23 @@ public:
      *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
      */
     void setThreadScheduling(int policy, int priority);
+
+    /**
+     * @brief Start the background scheduler that will fire at the next
+     *        WSPR window and launch the transmit thread.
+     *
+     * @note This is non‐blocking: returns immediately, scheduler runs in
+     *       its own thread.
+     */
+    void enableTransmission();
+
+    /**
+     * @brief Cancels the scheduler (and any running transmission).
+     *
+     * Waits for the scheduler thread to stop, and forces any in‐flight
+     * transmission to end.
+     */
+    void disableTransmission();
 
     /**
      * @brief Request an in‑flight transmission to stop.
@@ -1110,6 +1116,117 @@ private:
      *          If the call fails, writes a warning to stderr with the error message.
      */
     void set_thread_priority();
+
+    class TransmissionScheduler
+    {
+    public:
+        TransmissionScheduler(WsprTransmitter *parent)
+            : parent_{parent}
+        {
+        }
+
+        ~TransmissionScheduler()
+        {
+            stop();
+        }
+
+        /// Start the scheduler thread
+        void start()
+        {
+            stop_requested_.store(false, std::memory_order_release);
+            thread_ = std::thread(&TransmissionScheduler::run, this);
+        }
+
+        /// Signal the scheduler to exit, join the thread
+        void stop()
+        {
+            stop_requested_.store(true, std::memory_order_release);
+            cv_.notify_all();
+            if (thread_.joinable())
+                thread_.join();
+        }
+
+    private:
+        WsprTransmitter *parent_;
+        std::thread thread_;
+        std::atomic<bool> stop_requested_{false};
+        std::mutex mtx_;
+        std::condition_variable cv_;
+
+        /// Compute “1 s past next even‐minute or quarter‐hour”
+        std::chrono::system_clock::time_point nextEvent() const
+        {
+            using namespace std::chrono;
+            auto now = system_clock::now();
+            std::time_t t = system_clock::to_time_t(now);
+            std::tm tm = *std::localtime(&t);
+
+            // pick the next window
+            if (parent_->trans_params_.wspr_mode == WsprMode::WSPR15)
+            {
+                // quarter hours: 0,15,30,45
+                int q = (tm.tm_min / 15);
+                if (tm.tm_min % 15 == 0 && tm.tm_sec < 1)
+                {
+                    // same quarter
+                }
+                else
+                {
+                    if (++q >= 4)
+                    {
+                        q = 0;
+                        tm.tm_hour = (tm.tm_hour + 1) % 24;
+                    }
+                    tm.tm_min = q * 15;
+                }
+            }
+            else
+            {
+                // even minutes
+                int m = tm.tm_min;
+                if (m % 2 == 0 && tm.tm_sec < 1)
+                {
+                    // same
+                }
+                else
+                {
+                    if ((m % 2) != 0)
+                        ++m;
+                    else
+                        m += 2;
+                    if (m >= 60)
+                    {
+                        m -= 60;
+                        tm.tm_hour = (tm.tm_hour + 1) % 24;
+                    }
+                    tm.tm_min = m;
+                }
+            }
+            tm.tm_sec = 1;
+            tm.tm_isdst = -1;
+            auto next_t = std::mktime(&tm);
+            return system_clock::from_time_t(next_t);
+        }
+
+        /// The scheduler loop
+        void run()
+        {
+            while (!stop_requested_.load(std::memory_order_acquire))
+            {
+                auto when = nextEvent();
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_.wait_until(lk, when, [this]
+                               { return stop_requested_.load(std::memory_order_acquire); });
+                if (stop_requested_.load(std::memory_order_acquire))
+                    break;
+                // fire!
+                parent_->stop_requested_.store(false, std::memory_order_release);
+                parent_->tx_thread_ = std::thread(&WsprTransmitter::thread_entry, parent_);
+            }
+        }
+    };
+
+    TransmissionScheduler scheduler_{this};
 };
 
 extern WsprTransmitter wsprTransmitter;
