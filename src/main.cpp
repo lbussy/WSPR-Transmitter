@@ -51,9 +51,7 @@ int getch()
  */
 void pause_for_space()
 {
-    extern WsprTransmitter wsprTransmitter;
-
-    while (!wsprTransmitter.isStopping() && getch() != ' ')
+    while (getch() != ' ')
         ; // spin until stop or spacebar
 }
 

@@ -24,51 +24,44 @@
  * SOFTWARE.
  */
 
-// Implement class
-#include "wspr_transmit.hpp"
+#include "wspr_transmit.hpp" // Class Declarations
 
-// Submodules
-#include "wspr_message.hpp"
-#ifdef __cplusplus
+#include "wspr_message.hpp" // WsprMessage Submodule
+
 extern "C"
 {
-#include "mailbox.h"
+#include "mailbox.h" // Broadcom Mailbox Submodule
 }
-#endif
 
 // C++ Standard Library Headers
-#include <algorithm>
-#include <cassert>
-#include <cerrno>
-#include <cmath>
-#include <condition_variable>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <vector>
+#include <algorithm> // std::copy_n, std::clamp
+#include <cassert>   // assert()
+#include <cmath>     // std::round, std::pow, std::floor
+#include <cstdint>   // std::uintptr_t
+#include <cstring>   // std::memcpy, std::strerror
+#include <cstdlib>   // std::rand, RAND_MAX
+#include <fstream>   // std::ifstream
+#include <iomanip>   // std::setprecision
+#include <iostream>  // std::cout, std::cerr
+#include <optional>  // std::optional
+#include <random>    // std::random_device, std::mt19937, std::uniform_real_distribution
+#include <sstream>   // std::stringstream
+#include <stdexcept> // std::runtime_error
 
 // POSIX & System-Specific Headers
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <unistd.h>
+#include <fcntl.h>    // open flags
+#include <sys/mman.h> // mmap, munmap, MAP_SHARED, PROT_READ/WRITE
+#include <sys/stat.h> // struct stat, stat()
+#include <sys/time.h> // gettimeofday(), struct timeval
+#include <unistd.h>   // usleep(), close(), unlink()
 
 #ifdef DEBUG_WSPR_TRANSMIT
 constexpr const bool debug = true;
 #else
 constexpr const bool debug = false;
 #endif
+
+/* Public Methods */
 
 /**
  * @brief Global instance of the WSPR transmitter.
@@ -98,6 +91,24 @@ WsprTransmitter::WsprTransmitter() = default;
 WsprTransmitter::~WsprTransmitter()
 {
     shutdownTransmitter();
+}
+
+/**
+ * @brief Install optional callbacks for transmission start/end.
+ *
+ * @param[in] start_cb
+ *   Called on the transmit thread immediately before the first symbol
+ *   (or tone) is emitted.  If null, no start notification is made.
+ * @param[in] end_cb
+ *   Called on the transmit thread immediately after the last WSPR
+ *   symbol is sent (but before DMA/PWM are torn down).  If null,
+ *   no completion notification is made.
+ */
+void WsprTransmitter::setTransmissionCallbacks(CompletionCallback start_cb,
+                                               CompletionCallback end_cb)
+{
+    on_transmit_start_ = std::move(start_cb);
+    on_transmit_end_ = std::move(end_cb);
 }
 
 /**
@@ -138,7 +149,7 @@ void WsprTransmitter::setupTransmission(
         stopTransmission();        // tell the worker to stop
         if (tx_thread_.joinable()) // wait for it to actually exit
             tx_thread_.join();
-        dmaCleanup(); // now unmap/free everything
+        dma_cleanup(); // now unmap/free everything
     }
 
     // Clear the stop flag so the next thread can run
@@ -220,6 +231,191 @@ void WsprTransmitter::setupTransmission(
                   << "DEBUG: dma_table_freq[3] = " << trans_params_.dma_table_freq[3] << std::endl;
     }
 }
+
+/**
+ * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
+ *
+ * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
+ * @throws std::runtime_error if peripherals aren’t mapped.
+ */
+void WsprTransmitter::updateDMAForPPM(double ppm_new)
+{
+    // Apply the PPM correction to your working PLLD clock.
+    dma_config_.plld_clock_frequency =
+        dma_config_.plld_nominal_freq * (1.0 - ppm_new / 1e6);
+
+    // Recompute the DMA frequency table in place.
+    // Pass in your current center frequency so it can adjust if needed.
+    double center_actual = trans_params_.frequency;
+    setup_dma_freq_table(center_actual);
+    trans_params_.frequency = center_actual;
+}
+
+/**
+ * @brief Configure POSIX scheduling policy & priority for future transmissions.
+ *
+ * @details
+ *   This must be called _before_ `startTransmission()` if you need real-time
+ *   scheduling.  The next call to `startTransmission()` will launch its thread
+ *   under the given policy/priority.
+ *
+ * @param[in] policy
+ *   One of the standard POSIX policies (e.g. SCHED_FIFO, SCHED_RR, SCHED_OTHER).
+ * @param[in] priority
+ *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
+ */
+void WsprTransmitter::setThreadScheduling(int policy, int priority)
+{
+    thread_policy_ = policy;
+    thread_priority_ = priority;
+}
+
+/**
+ * @brief Start the background scheduler that will fire at the next
+ *        WSPR window and launch the transmit thread.
+ *
+ * @note This is non‐blocking: returns immediately, scheduler runs in
+ *       its own thread.
+ */
+void WsprTransmitter::enableTransmission()
+{
+    // Any in-flight tx should be clear
+    stop_requested_.store(false, std::memory_order_release);
+    scheduler_.start();
+}
+
+/**
+ * @brief Cancels the scheduler (and any running transmission).
+ *
+ * Waits for the scheduler thread to stop, and forces any in‐flight
+ * transmission to end.
+ */
+void WsprTransmitter::disableTransmission()
+{
+    // Atop scheduling further windows
+    scheduler_.stop();
+    // if a transmit thread is running, signal & join it too
+    stop_requested_.store(true, std::memory_order_release);
+    stop_cv_.notify_all();
+    if (tx_thread_.joinable())
+        tx_thread_.join();
+}
+
+/**
+ * @brief Request an in‑flight transmission to stop.
+ *
+ * @details Sets the internal stop flag so that ongoing loops in the transmit
+ *          thread will exit at the next interruption point. Notifies any
+ *          condition_variable waits to unblock the thread promptly.
+ */
+void WsprTransmitter::stopTransmission()
+{
+    // Tell the worker to stop
+    stop_requested_.store(true);
+    // Unblock any waits
+    stop_cv_.notify_all();
+}
+
+/**
+ * @brief Gracefully stops and waits for the transmission thread.
+ *
+ * @details Combines stopTransmission() to signal the worker thread to
+ *          exit, and join_transmission() to block until that thread has
+ *          fully terminated. After this call returns, no transmission
+ *          thread remains running.
+ */
+void WsprTransmitter::shutdownTransmitter()
+{
+    stopTransmission();
+    join_transmission();
+    dma_cleanup();
+}
+
+/**
+ * @brief Check if the GPIO is bound to the clock.
+ *
+ * @details Returns a value indicating if the system is transmitting
+ * in any way,
+ *
+ * @return `true` if clock is engaged, `false` otherwise.
+ */
+bool WsprTransmitter::isTransmitting() const noexcept
+{
+    return transmit_on_.load(std::memory_order_acquire);
+}
+
+/**
+ * @brief Prints current transmission parameters and encoded WSPR symbols.
+ *
+ * @details Displays the configured WSPR parameters including frequency,
+ * power, mode, tone/test settings, and symbol timing. If tone mode is
+ * enabled (`trans_params_.is_tone == true`), message-related fields like
+ * call sign and symbols are shown as "N/A".
+ *
+ * This function is useful for debugging and verifying that all transmission
+ * settings and symbol sequences are correctly populated before transmission.
+ */
+void WsprTransmitter::printParameters()
+{
+    // General transmission metadata
+    std::cout << "Call Sign:         "
+              << (trans_params_.is_tone ? "N/A" : trans_params_.call_sign) << std::endl;
+
+    std::cout << "Grid Square:       "
+              << (trans_params_.is_tone ? "N/A" : trans_params_.grid_square) << std::endl;
+
+    std::cout << "WSPR Frequency:    "
+              << std::fixed << std::setprecision(6)
+              << (trans_params_.frequency / 1.0e6) << " MHz" << std::endl;
+
+    std::cout << "GPIO Power:        "
+              << std::fixed << std::setprecision(1)
+              << convert_mw_dbm(get_gpio_power_mw(trans_params_.power)) << " dBm" << std::endl;
+
+    std::cout << "WSPR Mode:         "
+              << (trans_params_.is_tone ? "N/A" : (trans_params_.wspr_mode == WsprMode::WSPR2 ? "WSPR-2" : "WSPR-15")) << std::endl;
+
+    std::cout << "Test Tone:         "
+              << (trans_params_.is_tone ? "True" : "False") << std::endl;
+
+    std::cout << "WSPR Symbol Time:  "
+              << (trans_params_.is_tone ? "N/A" : std::to_string(trans_params_.symtime) + " s") << std::endl;
+
+    std::cout << "WSPR Tone Spacing: "
+              << (trans_params_.is_tone ? "N/A" : std::to_string(trans_params_.tone_spacing) + " Hz") << std::endl;
+
+    std::cout << "DMA Table Size:    "
+              << trans_params_.dma_table_freq.size() << std::endl;
+
+    // Print symbols unless in tone mode
+    if (trans_params_.is_tone)
+    {
+        std::cout << "WSPR Symbols:      N/A" << std::endl;
+    }
+    else
+    {
+        std::cout << "WSPR Symbols:" << std::endl;
+        const int symbol_count = static_cast<int>(trans_params_.symbols.size());
+        for (int i = 0; i < symbol_count; ++i)
+        {
+            std::cout << static_cast<int>(trans_params_.symbols[i]);
+
+            if (i < symbol_count - 1)
+            {
+                std::cout << ", ";
+            }
+
+            // Insert newline every 18 symbols for readability
+            if ((i + 1) % 18 == 0 && i < symbol_count - 1)
+            {
+                std::cout << std::endl;
+            }
+        }
+        std::cout << std::endl;
+    }
+}
+
+/* Private Methods */
 
 /**
  * @brief Perform DMA-driven RF transmission.
@@ -318,74 +514,6 @@ void WsprTransmitter::transmit()
 }
 
 /**
- * @brief Request an in‑flight transmission to stop.
- *
- * @details Sets the internal stop flag so that ongoing loops in the transmit
- *          thread will exit at the next interruption point. Notifies any
- *          condition_variable waits to unblock the thread promptly.
- */
-void WsprTransmitter::stopTransmission()
-{
-    // Tell the worker to stop
-    stop_requested_.store(true);
-    // Unblock any waits
-    stop_cv_.notify_all();
-}
-
-/**
- * @brief Install optional callbacks for transmission start/end.
- *
- * @param[in] start_cb
- *   Called on the transmit thread immediately before the first symbol
- *   (or tone) is emitted.  If null, no start notification is made.
- * @param[in] end_cb
- *   Called on the transmit thread immediately after the last WSPR
- *   symbol is sent (but before DMA/PWM are torn down).  If null,
- *   no completion notification is made.
- */
-void WsprTransmitter::setTransmissionCallbacks(CompletionCallback start_cb,
-                                               CompletionCallback end_cb)
-{
-    on_transmit_start_ = std::move(start_cb);
-    on_transmit_end_ = std::move(end_cb);
-}
-
-/**
- * @brief Configure POSIX scheduling policy & priority for future transmissions.
- *
- * @details
- *   This must be called _before_ `startTransmission()` if you need real-time
- *   scheduling.  The next call to `startTransmission()` will launch its thread
- *   under the given policy/priority.
- *
- * @param[in] policy
- *   One of the standard POSIX policies (e.g. SCHED_FIFO, SCHED_RR, SCHED_OTHER).
- * @param[in] priority
- *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
- */
-void WsprTransmitter::setThreadScheduling(int policy, int priority)
-{
-    thread_policy_   = policy;
-    thread_priority_ = priority;
-}
-
-void WsprTransmitter::enableTransmission() {
-    // Any in-flight tx should be clear
-    stop_requested_.store(false, std::memory_order_release);
-    scheduler_.start();
-}
-
-void WsprTransmitter::disableTransmission() {
-    // Atop scheduling further windows
-    scheduler_.stop();
-    // if a transmit thread is running, signal & join it too
-    stop_requested_.store(true, std::memory_order_release);
-    stop_cv_.notify_all();
-    if (tx_thread_.joinable())
-        tx_thread_.join();
-}
-
-/**
  * @brief Waits for the background transmission thread to finish.
  *
  * @details If the transmission thread was launched via
@@ -393,111 +521,12 @@ void WsprTransmitter::disableTransmission() {
  *          that thread has completed and joined. After returning,
  *          tx_thread_ is no longer joinable.
  */
-void WsprTransmitter::joinTransmission()
+void WsprTransmitter::join_transmission()
 {
     if (tx_thread_.joinable())
     {
         tx_thread_.join();
     }
-}
-
-/**
- * @brief Gracefully stops and waits for the transmission thread.
- *
- * @details Combines stopTransmission() to signal the worker thread to
- *          exit, and joinTransmission() to block until that thread has
- *          fully terminated. After this call returns, no transmission
- *          thread remains running.
- */
-void WsprTransmitter::shutdownTransmitter()
-{
-    stopTransmission();
-    joinTransmission();
-    dmaCleanup();
-}
-
-/**
- * @brief Check if a stop request has been issued.
- *
- * @details Returns true if stopTransmission() was called and the
- *          internal stop flag is set. Use this to poll from external
- *          loops or helper functions to determine if the transmitter
- *          is in the process of shutting down.
- *
- * @return `true` if a stop has been requested, `false` otherwise.
- */
-bool WsprTransmitter::isStopping() const noexcept
-{
-    return stop_requested_.load(std::memory_order_acquire);
-}
-
-/**
- * @brief Check if the GPIO is bound to the clock.
- *
- * @details Returns a value indicating if the system is transmitting
- * in any way,
- *
- * @return `true` if clock is engaged, `false` otherwise.
- */
-bool WsprTransmitter::isTransmitting() const noexcept
-{
-    return transmit_on_.load(std::memory_order_acquire);
-}
-
-/**
- * @brief Entry point for the background transmission thread.
- *
- * @details Applies the configured POSIX scheduling policy and priority
- *          (via set_thread_priority()), then invokes transmit() to carry
- *          out the actual transmission work. This method runs inside the
- *          new thread and returns only when transmit() completes or a
- *          stop request is observed.
- */
-void WsprTransmitter::thread_entry()
-{
-    // bump our own scheduling parameters first:
-    set_thread_priority();
-    // actually do the work (blocking until complete or stop_requested_)
-    transmit();
-}
-
-/**
- * @brief Applies the configured scheduling policy and priority to this thread.
- *
- * @details Builds a sched_param struct using thread_priority_ and invokes
- *          pthread_setschedparam() with thread_policy_ on the current thread.
- *          If the call fails, writes a warning to stderr with the error message.
- */
-void WsprTransmitter::set_thread_priority()
-{
-    // Only real‑time policies use priority > 0
-    sched_param sch{};
-    sch.sched_priority = thread_priority_;
-    int ret = pthread_setschedparam(pthread_self(), thread_policy_, &sch);
-    if (ret != 0)
-    {
-        std::cerr << "Warning: pthread_setschedparam failed: "
-                  << std::strerror(ret) << std::endl;
-    }
-}
-
-/**
- * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
- *
- * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
- * @throws std::runtime_error if peripherals aren’t mapped.
- */
-void WsprTransmitter::updateDMAForPPM(double ppm_new)
-{
-    // Apply the PPM correction to your working PLLD clock.
-    dma_config_.plld_clock_frequency =
-        dma_config_.plld_nominal_freq * (1.0 - ppm_new / 1e6);
-
-    // Recompute the DMA frequency table in place.
-    // Pass in your current center frequency so it can adjust if needed.
-    double center_actual = trans_params_.frequency;
-    setup_dma_freq_table(center_actual);
-    trans_params_.frequency = center_actual;
 }
 
 /**
@@ -516,7 +545,7 @@ void WsprTransmitter::updateDMAForPPM(double ppm_new)
  *
  * @note This function is idempotent; subsequent calls are no‑ops.
  */
-void WsprTransmitter::dmaCleanup()
+void WsprTransmitter::dma_cleanup()
 {
     // Only clean up if we have something to tear down
     if (!dma_setup_done_)
@@ -572,77 +601,6 @@ void WsprTransmitter::dmaCleanup()
 }
 
 /**
- * @brief Prints current transmission parameters and encoded WSPR symbols.
- *
- * @details Displays the configured WSPR parameters including frequency,
- * power, mode, tone/test settings, and symbol timing. If tone mode is
- * enabled (`trans_params_.is_tone == true`), message-related fields like
- * call sign and symbols are shown as "N/A".
- *
- * This function is useful for debugging and verifying that all transmission
- * settings and symbol sequences are correctly populated before transmission.
- */
-void WsprTransmitter::printParameters()
-{
-    // General transmission metadata
-    std::cout << "Call Sign:         "
-              << (trans_params_.is_tone ? "N/A" : trans_params_.call_sign) << std::endl;
-
-    std::cout << "Grid Square:       "
-              << (trans_params_.is_tone ? "N/A" : trans_params_.grid_square) << std::endl;
-
-    std::cout << "WSPR Frequency:    "
-              << std::fixed << std::setprecision(6)
-              << (trans_params_.frequency / 1.0e6) << " MHz" << std::endl;
-
-    std::cout << "GPIO Power:        "
-              << std::fixed << std::setprecision(1)
-              << convertmWDBM(getGPIOPowermW(trans_params_.power)) << " dBm" << std::endl;
-
-    std::cout << "WSPR Mode:         "
-              << (trans_params_.is_tone ? "N/A" : (trans_params_.wspr_mode == WsprMode::WSPR2 ? "WSPR-2" : "WSPR-15")) << std::endl;
-
-    std::cout << "Test Tone:         "
-              << (trans_params_.is_tone ? "True" : "False") << std::endl;
-
-    std::cout << "WSPR Symbol Time:  "
-              << (trans_params_.is_tone ? "N/A" : std::to_string(trans_params_.symtime) + " s") << std::endl;
-
-    std::cout << "WSPR Tone Spacing: "
-              << (trans_params_.is_tone ? "N/A" : std::to_string(trans_params_.tone_spacing) + " Hz") << std::endl;
-
-    std::cout << "DMA Table Size:    "
-              << trans_params_.dma_table_freq.size() << std::endl;
-
-    // Print symbols unless in tone mode
-    if (trans_params_.is_tone)
-    {
-        std::cout << "WSPR Symbols:      N/A" << std::endl;
-    }
-    else
-    {
-        std::cout << "WSPR Symbols:" << std::endl;
-        const int symbol_count = static_cast<int>(trans_params_.symbols.size());
-        for (int i = 0; i < symbol_count; ++i)
-        {
-            std::cout << static_cast<int>(trans_params_.symbols[i]);
-
-            if (i < symbol_count - 1)
-            {
-                std::cout << ", ";
-            }
-
-            // Insert newline every 18 symbols for readability
-            if ((i + 1) % 18 == 0 && i < symbol_count - 1)
-            {
-                std::cout << std::endl;
-            }
-        }
-        std::cout << std::endl;
-    }
-}
-
-/**
  * @brief Get the GPIO drive strength in milliamps.
  *
  * Maps a drive strength level (0–7) to its corresponding current drive
@@ -652,13 +610,69 @@ void WsprTransmitter::printParameters()
  * @return int   Drive strength in mA.
  * @throws std::out_of_range if level is outside the [0,7] range.
  */
-constexpr int WsprTransmitter::getGPIOPowermW(int level)
+constexpr int WsprTransmitter::get_gpio_power_mw(int level)
 {
     if (level < 0 || level >= static_cast<int>(DRIVE_STRENGTH_TABLE.size()))
     {
         throw std::out_of_range("Drive strength level must be between 0 and 7");
     }
     return DRIVE_STRENGTH_TABLE[level];
+}
+
+/**
+ * @brief Convert power in milliwatts to decibels referenced to 1 mW (dBm).
+ *
+ * Uses the formula:
+ * PdBm=10*LOG10(mW/1) where mW = power in milliwatts
+ *
+ * @param mw  Power in milliwatts. Must be greater than 0.
+ * @return    Power in dBm.
+ * @throws    std::domain_error if mw is not positive.
+ */
+inline double WsprTransmitter::convert_mw_dbm(double mw)
+{
+    if (mw <= 0.0)
+    {
+        throw std::domain_error("Input power (mW) must be > 0 to compute logarithm");
+    }
+    return 10.0 * std::log10(mw);
+}
+
+/**
+ * @brief Entry point for the background transmission thread.
+ *
+ * @details Applies the configured POSIX scheduling policy and priority
+ *          (via set_thread_priority()), then invokes transmit() to carry
+ *          out the actual transmission work. This method runs inside the
+ *          new thread and returns only when transmit() completes or a
+ *          stop request is observed.
+ */
+void WsprTransmitter::thread_entry()
+{
+    // bump our own scheduling parameters first:
+    set_thread_priority();
+    // actually do the work (blocking until complete or stop_requested_)
+    transmit();
+}
+
+/**
+ * @brief Applies the configured scheduling policy and priority to this thread.
+ *
+ * @details Builds a sched_param struct using thread_priority_ and invokes
+ *          pthread_setschedparam() with thread_policy_ on the current thread.
+ *          If the call fails, writes a warning to stderr with the error message.
+ */
+void WsprTransmitter::set_thread_priority()
+{
+    // Only real‑time policies use priority > 0
+    sched_param sch{};
+    sch.sched_priority = thread_priority_;
+    int ret = pthread_setschedparam(pthread_self(), thread_policy_, &sch);
+    if (ret != 0)
+    {
+        std::cerr << "Warning: pthread_setschedparam failed: "
+                  << std::strerror(ret) << std::endl;
+    }
 }
 
 /**
@@ -1581,23 +1595,4 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
             assert((tuning_word[i] & (~0xFFF)) == (tuning_word[i + 1] & (~0xFFF)));
         }
     }
-}
-
-/**
- * @brief Convert power in milliwatts to decibels referenced to 1 mW (dBm).
- *
- * Uses the formula:
- * PdBm=10*LOG10(mW/1) where mW = power in milliwatts
- *
- * @param mw  Power in milliwatts. Must be greater than 0.
- * @return    Power in dBm.
- * @throws    std::domain_error if mw is not positive.
- */
-inline double WsprTransmitter::convertmWDBM(double mw)
-{
-    if (mw <= 0.0)
-    {
-        throw std::domain_error("Input power (mW) must be > 0 to compute logarithm");
-    }
-    return 10.0 * std::log10(mw);
 }

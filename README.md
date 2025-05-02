@@ -6,7 +6,7 @@ A C++17 class for transmitting WSPR messages or continuous test tones using DMA 
 
 - **WSPR & Test-Tone**: Supports both timed WSPR symbol sequences and indefinite test-tone transmission.
 - **Real-Time Threading**: Runs transmission in a separate `std::thread` with configurable POSIX scheduling policy (`SCHED_FIFO`, `SCHED_RR`, `SCHED_OTHER`) and priority.
-- **Clean Shutdown**: Provides `stopTransmission()`, `joinTransmission()`, and `shutdownTransmitter()` for safe, coordinated thread termination.
+- **Clean Shutdown**: Provides `stopTransmission()`, and `shutdownTransmitter()` for safe, coordinated thread termination.
 - **DMA-Based**: Uses DMA control blocks and PWM clocks for precise timing.
 - **Callback Support**: Optional `on_transmission_complete` callback for event-driven programs.
 
@@ -55,13 +55,11 @@ int main() {
     // Start in real-time thread (FIFO, priority 30)
     tx.startTransmission(SCHED_FIFO, 30);
 
-    // Wait for user to stop
-    std::cout << "Press <space> to stop...";
-    pause_for_space();  // interlocks with tx.isStopping()
+    // Add some wait/loop here
 
     // Clean shutdown
     tx.shutdownTransmitter();
-    tx.dmaCleanup();
+    tx.dma_cleanup();
 
     std::cout << "Transmission stopped." << std::endl;
     return 0;
@@ -82,17 +80,9 @@ Launches transmission in a background thread with the given scheduling policy an
 
 Signals the transmit thread to exit at the next safe point.
 
-### `void joinTransmission()`
-
-Blocks until the background transmission thread has terminated.
-
 ### `void shutdownTransmitter()`
 
-Convenience: calls `stopTransmission()` then `joinTransmission()`.
-
-### `bool isStopping() const`
-
-Returns `true` if a stop request has been issued.
+Convenience: calls `stopTransmission()` then `join_transmission()`.
 
 ### `std::function<void()> on_transmission_complete`
 

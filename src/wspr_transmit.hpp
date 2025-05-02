@@ -27,22 +27,18 @@
 #ifndef _WSPR_TRANSMIT_HPP
 #define _WSPR_TRANSMIT_HPP
 
-#include "config_handler.hpp"
 #include "wspr_message.hpp"
 
-#include <array>
-#include <atomic>
-#include <condition_variable>
-#include <functional>
-#include <iomanip>
-#include <iostream>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <vector>
-
-#include <sched.h>
-#include <pthread.h>
+#include <array>              // std::array
+#include <atomic>             // std::atomic
+#include <condition_variable> // std::condition_variable
+#include <functional>         // std::function
+#include <mutex>              // std::mutex
+#include <string>             // std::string
+#include <thread>             // std::thread
+#include <vector>             // std::vector
+#include <chrono>             // std::chrono in TransmissionScheduler
+#include <ctime>              // std::time_t, std::tm, std::mktime
 
 /**
  * @enum WsprMode
@@ -120,6 +116,46 @@ public:
                                   CompletionCallback end_cb = {});
 
     /**
+     * @brief Configure and start a WSPR transmission.
+     *
+     * @details Performs the following sequence:
+     *   1. Set the desired RF frequency and power level.
+     *   2. Populate WSPR symbol data if transmitting a message.
+     *   3. Determine WSPR mode (2‑tone or 15‑tone) and symbol timing.
+     *   4. Optionally apply a random frequency offset to spread spectral load.
+     *   5. Initialize DMA and mailbox resources.
+     *   6. Apply the specified PPM calibration to the PLLD clock.
+     *   7. Rebuild the DMA frequency table with the new PPM‑corrected clock.
+     *   8. Update the actual center frequency after any hardware adjustments.
+     *
+     * @param[in] frequency    Target RF frequency in Hz.
+     * @param[in] power        Transmit power index (0‑n).
+     * @param[in] ppm          Parts‑per‑million correction to apply (e.g. +11.135).
+     * @param[in] callsign     Optional callsign for WSPR message.
+     * @param[in] grid_square  Optional Maidenhead grid locator.
+     * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
+     * @param[in] use_offset   True to apply a small random offset within band.
+     *
+     * @throws std::runtime_error if DMA setup or mailbox operations fail.
+     */
+    void setupTransmission(
+        double frequency,
+        int power = 0,
+        double ppm = 0.0,
+        std::string call_sign = "",
+        std::string grid_square = "",
+        int power_dbm = 0,
+        bool use_offset = false);
+
+    /**
+     * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
+     *
+     * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
+     * @throws std::runtime_error if peripherals aren’t mapped.
+     */
+    void updateDMAForPPM(double ppm_new);
+
+    /**
      * @brief Configure POSIX scheduling policy & priority for future transmissions.
      *
      * @details
@@ -161,36 +197,14 @@ public:
     void stopTransmission();
 
     /**
-     * @brief Waits for the background transmission thread to finish.
-     *
-     * @details If the transmission thread was launched via
-     *          startTransmission(), this call will block until
-     *          that thread has completed and joined. After returning,
-     *          tx_thread_ is no longer joinable.
-     */
-    void joinTransmission();
-
-    /**
      * @brief Gracefully stops and waits for the transmission thread.
      *
      * @details Combines stopTransmission() to signal the worker thread to
-     *          exit, and joinTransmission() to block until that thread has
+     *          exit, and join_transmission() to block until that thread has
      *          fully terminated. After this call returns, no transmission
      *          thread remains running.
      */
     void shutdownTransmitter();
-
-    /**
-     * @brief Check if a stop request has been issued.
-     *
-     * @details Returns true if stopTransmission() was called and the
-     *          internal stop flag is set. Use this to poll from external
-     *          loops or helper functions to determine if the transmitter
-     *          is in the process of shutting down.
-     *
-     * @return `true` if a stop has been requested, `false` otherwise.
-     */
-    bool isStopping() const noexcept;
 
     /**
      * @brief Check if the GPIO is bound to the clock.
@@ -201,80 +215,6 @@ public:
      * @return `true` if clock is engaged, `false` otherwise.
      */
     bool isTransmitting() const noexcept;
-
-    /**
-     * @brief Configure and start a WSPR transmission.
-     *
-     * @details Performs the following sequence:
-     *   1. Set the desired RF frequency and power level.
-     *   2. Populate WSPR symbol data if transmitting a message.
-     *   3. Determine WSPR mode (2‑tone or 15‑tone) and symbol timing.
-     *   4. Optionally apply a random frequency offset to spread spectral load.
-     *   5. Initialize DMA and mailbox resources.
-     *   6. Apply the specified PPM calibration to the PLLD clock.
-     *   7. Rebuild the DMA frequency table with the new PPM‑corrected clock.
-     *   8. Update the actual center frequency after any hardware adjustments.
-     *
-     * @param[in] frequency    Target RF frequency in Hz.
-     * @param[in] power        Transmit power index (0‑n).
-     * @param[in] ppm          Parts‑per‑million correction to apply (e.g. +11.135).
-     * @param[in] callsign     Optional callsign for WSPR message.
-     * @param[in] grid_square  Optional Maidenhead grid locator.
-     * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
-     * @param[in] use_offset   True to apply a small random offset within band.
-     *
-     * @throws std::runtime_error if DMA setup or mailbox operations fail.
-     */
-    void setupTransmission(
-        double frequency,
-        int power = 0,
-        double ppm = 0.0,
-        std::string call_sign = "",
-        std::string grid_square = "",
-        int power_dbm = 0,
-        bool use_offset = false);
-
-    /**
-     * @brief Perform DMA-driven RF transmission.
-     *
-     * @details
-     *   1. Records the start time as a reference for symbol scheduling.
-     *   2. Enables the PWM clock and DMA engine for transmission.
-     *   3. If in tone mode, continuously transmits a fixed‑frequency test tone.
-     *   4. Otherwise, transmits each WSPR symbol in sequence, using gettimeofday()
-     *      and `timeval_subtract()` to schedule precise symbol timing.
-     *   5. Disables transmission when complete.
-     *
-     * @note In tone mode (`trans_params_.is_tone == true`), this function only
-     *       returns via SIGINT.
-     */
-    void transmit();
-
-    /**
-     * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
-     *
-     * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
-     * @throws std::runtime_error if peripherals aren’t mapped.
-     */
-    void updateDMAForPPM(double ppm_new);
-
-    /**
-     * @brief Clean up DMA and mailbox resources.
-     *
-     * @details Performs teardown in the following order:
-     *   1. Prevent multiple invocations.
-     *   2. Stop any ongoing DMA transfers and disable the PWM clock.
-     *   3. Restore saved clock and PWM register values.
-     *   4. Reset the DMA controller.
-     *   5. Unmap the peripheral base address region.
-     *   6. Deallocate mailbox memory pages.
-     *   7. Close the mailbox handle.
-     *   8. Remove the local device file.
-     *   9. Reset all configuration data to defaults.
-     *
-     * @note This function is idempotent; subsequent calls are no‑ops.
-     */
-    void dmaCleanup();
 
     /**
      * @brief Prints current transmission parameters and encoded WSPR symbols.
@@ -288,38 +228,32 @@ public:
      */
     void printParameters();
 
-    /**
-     * @brief Get the GPIO drive strength in milliamps.
-     *
-     * Maps a drive strength level (0–7) to its corresponding current drive
-     * capability in milliamps (mA).
-     *
-     * @param level Drive strength level (0–7).
-     * @return int   Drive strength in mA.
-     * @throws std::out_of_range if level is outside the [0,7] range.
-     */
-    constexpr int getGPIOPowermW(int level);
-
-    /**
-     * @brief Convert power in milliwatts to decibels referenced to 1 mW (dBm).
-     *
-     * @param mw  Power in milliwatts. Must be greater than 0.
-     * @return    Power in dBm.
-     * @throws    std::domain_error if mw is not positive.
-     */
-    inline double convertmWDBM(double mw);
-
 private:
-    /// Invoked just before each transmission begins (tone or WSPR).
+    /**
+     * @brief Invoked just before each transmission begins.
+     *
+     * This callback is fired on the transmit thread immediately before
+     * starting either a continuous tone or a WSPR symbol sequence.
+     * Users can assign a function via `setTransmissionCallbacks()` to
+     * perform any setup or logging when transmission is about to start.
+     */
     CompletionCallback on_transmit_start_{};
-    /// Invoked just after WSPR symbols complete (before shutdown).
+
+    /**
+     * @brief Invoked immediately after all WSPR symbols have been sent.
+     *
+     * This callback is fired on the transmit thread right after the last
+     * WSPR symbol is transmitted and before the hardware is torn down.
+     * Users can assign a function via `setTransmissionCallbacks()` to
+     * perform any cleanup or notification when a WSPR transmission completes.
+     */
     CompletionCallback on_transmit_end_{};
 
     /**
      * @brief Background thread for carrying out the transmission.
      *
      * Launched by startTransmission() and joined by
-     * joinTransmission().
+     * join_transmission().
      */
     std::thread tx_thread_;
 
@@ -368,6 +302,13 @@ private:
     std::mutex stop_mutex_;
 
     /**
+     * @brief Global dma setup semaphore.
+     *
+     * Shows if setup_dma() been run and not yet torn down.
+     */
+    bool dma_setup_done_{false};
+
+    /**
      * @brief Holds the bus and virtual addresses for a physical memory page.
      *
      * This structure is used to store the mapping between the bus address (used for DMA
@@ -411,258 +352,6 @@ private:
      * for managing data transfers.
      */
     struct PageInfo instructions_[1024];
-
-    /**
-     * @brief Structure containing parameters for a WSPR transmission.
-     *
-     * This structure encapsulates all the necessary parameters required to configure
-     * and execute a WSPR transmission, including the message, transmission frequency,
-     * symbol time, tone spacing, and the DMA frequency lookup table.
-     */
-    struct WsprTransmissionParams
-    {
-        static const std::size_t symbol_count = MSG_SIZE;
-        std::array<uint8_t, symbol_count> symbols;
-
-        std::string call_sign;              ///< Callsign of operator
-        std::string grid_square;            ///< Maidenhead grid square of origination
-        int power_dbm;                      ///< Reported transmission power in dBm
-        double frequency;                   ///< Transmission frequency in Hz.
-        double ppm;                         ///< Current system PPM adjustment
-        bool is_tone;                       ///< Is test tone
-        int power;                          ///< GPIO power level 0-7
-        WsprMode wspr_mode;                 ///< WSPR mode for the frequency.
-        double symtime;                     ///< Duration of each symbol in seconds.
-        double tone_spacing;                ///< Frequency spacing between adjacent tones in Hz.
-        std::vector<double> dma_table_freq; ///< DMA frequency lookup table.
-        bool use_offset;                    ///< Use random offset on transmissions
-
-        /**
-         * @brief Default constructor for WsprTransmissionParams.
-         *
-         * Initializes the transmission parameters with default values.
-         */
-        WsprTransmissionParams()
-            : symbols{},
-              frequency(0.0),
-              is_tone(false),
-              power(0),
-              wspr_mode(WsprMode::WSPR2),
-              symtime(0.0),
-              tone_spacing(0.0),
-              dma_table_freq(1024, 0.0),
-              use_offset(false)
-        {
-        }
-    };
-
-    /**
-     * @brief Global instance of transmission parameters for WSPR.
-     *
-     * This global variable holds the current settings used for a WSPR transmission,
-     * including the WSPR message, transmission frequency, symbol time, tone spacing,
-     * and the DMA frequency lookup table.
-     */
-    struct WsprTransmissionParams trans_params_;
-
-    /**
-     * @brief DMA configuration and saved state for transmission setup/cleanup.
-     *
-     * @details Stores both the nominal and (PPM‑corrected) PLLD clock frequencies,
-     *          mailbox memory flags, the virtual base address for peripheral access,
-     *          and the original register values that must be restored when
-     *          tearing down DMA/PWM configuration.
-     */
-    struct DMAConfig
-    {
-        double plld_nominal_freq;      ///< PLLD clock frequency in Hz before any PPM correction.
-        double plld_clock_frequency;   ///< PLLD clock frequency in Hz after PPM correction.
-        int mem_flag;                  ///< Mailbox memory allocation flags for DMA.
-        void *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
-        uint32_t orig_gp0ctl;          ///< Saved GP0CTL register (clock control).
-        uint32_t orig_gp0div;          ///< Saved GP0DIV register (clock divider).
-        uint32_t orig_pwm_ctl;         ///< Saved PWM control register.
-        uint32_t orig_pwm_sta;         ///< Saved PWM status register.
-        uint32_t orig_pwm_rng1;        ///< Saved PWM range register 1.
-        uint32_t orig_pwm_rng2;        ///< Saved PWM range register 2.
-        uint32_t orig_pwm_fifocfg;     ///< Saved PWM FIFO configuration register.
-
-        /**
-         * @brief Construct a new DMAConfig with default (nominal) settings.
-         *
-         * @details Initializes:
-         *   - `plld_nominal_freq` to 500 MHz with the built‑in 2.5 ppm correction.
-         *   - `plld_clock_frequency` equal to `plld_nominal_freq`.
-         *   - `mem_flag` to the default mailbox flag.
-         *   - All pointers and saved‑register fields to zero or nullptr.
-         */
-        DMAConfig()
-            : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
-              plld_clock_frequency(plld_nominal_freq),
-              mem_flag(0x0c),
-              peripheral_base_virtual(nullptr),
-              orig_gp0ctl(0),
-              orig_gp0div(0),
-              orig_pwm_ctl(0),
-              orig_pwm_sta(0),
-              orig_pwm_rng1(0),
-              orig_pwm_rng2(0),
-              orig_pwm_fifocfg(0)
-        {
-        }
-    };
-
-    /**
-     * @brief Global configuration object.
-     *
-     * This DMAConfig instance holds the transmission functionality global objects.
-     */
-    struct DMAConfig dma_config_;
-
-    /**
-     * @brief Global dma setup semaphore.
-     *
-     * Shows if setup_dma() been run and not yet torn down.
-     */
-    bool dma_setup_done_{false};
-
-    /**
-     * @brief Global mailbox structure for Broadcom mailbox communication.
-     *
-     * This static structure stores information related to the Broadcom mailbox interface,
-     * which is used for allocating, locking, and mapping physical memory for DMA operations.
-     * It is declared as a file-scope static variable so that exit handlers and other parts
-     * of the program can access its members.
-     *
-     * @var mailbox_::handle
-     *      Mailbox handle obtained from mbox_open(), used for communication with the mailbox.
-     * @var mailbox_::mem_ref
-     *      Memory reference returned by mem_alloc(), identifying the allocated memory block.
-     * @var mailbox_::bus_addr
-     *      Bus address of the allocated memory, obtained from mem_lock().
-     * @var mailbox_::virt_addr
-     *      Virtual address mapped to the allocated physical memory via mapmem().
-     * @var mailbox_::pool_size
-     *      The total number of memory pages allocated in the pool.
-     * @var mailbox_::pool_cnt
-     *      The count of memory pages that have been allocated from the pool so far.
-     */
-    struct Mailbox
-    {
-        int handle = -1;       ///< mailbox fd
-        unsigned mem_ref = 0;  ///< mem_alloc()
-        unsigned bus_addr = 0; ///< mem_lock()
-        unsigned char *virt_addr = nullptr;
-        unsigned pool_size = 0; ///< total DMA pages
-        unsigned pool_cnt = 0;  ///< pages handed out
-    };
-
-    /**
-     * @brief Mailbox state for DMA memory management.
-     *
-     * This member holds the mailbox handle (from mbox_open()), the memory
-     * reference ID (from mem_alloc()), the bus address (from mem_lock()),
-     * the virtual address pointer (from mapmem()), and the pool parameters
-     * for page allocation.
-     */
-    Mailbox mailbox_;
-
-    /**
-     * @brief Control Block (CB) structure for DMA engine commands.
-     *
-     * This struct defines the fields the DMA engine reads to perform a
-     * transfer: control bits, source/destination addresses, transfer length,
-     * optional 2D stride, and chaining to the next block. Reserved fields
-     * must be zero.
-     */
-    struct CB
-    {
-        volatile unsigned int TI;        ///< Transfer Information field for DMA control.
-        volatile unsigned int SOURCE_AD; ///< Source bus address for the DMA transfer.
-        volatile unsigned int DEST_AD;   ///< Destination bus address for the DMA transfer.
-        volatile unsigned int TXFR_LEN;  ///< Length (in bytes) of the transfer.
-        volatile unsigned int STRIDE;    ///< 2D stride value (unused if single block).
-        volatile unsigned int NEXTCONBK; ///< Bus address of the next CB in the chain.
-        volatile unsigned int RES1;      ///< Reserved, must be zero.
-        volatile unsigned int RES2;      ///< Reserved, must be zero.
-    };
-
-    /**
-     * @brief Control structure for the clock generator.
-     *
-     * This structure is used to configure the clock generator on the Raspberry Pi,
-     * which is essential for transmitting radio signals by manipulating the PLLD clock
-     * and routing the output to a GPIO pin.
-     *
-     * The bit-fields in this structure allow you to set the clock source, enable or disable
-     * the clock, force the clock off (kill), check the busy status, flip the output phase,
-     * set the MASH filter (which affects clock stability), and provide the required password
-     * to modify the control registers.
-     *
-     * Bit-field breakdown:
-     * - **SRC (4 bits):** Clock source selection.
-     * - **ENAB (1 bit):** Enable bit. Set to 1 to enable the clock.
-     * - **KILL (1 bit):** Kill bit. Set to 1 to force the clock off.
-     * - **(1 bit reserved):** Unused.
-     * - **BUSY (1 bit):** Busy status. Indicates if the clock generator is active.
-     * - **FLIP (1 bit):** Flip bit. May be used for phase inversion.
-     * - **MASH (2 bits):** MASH filter setting for noise shaping.
-     * - **(13 bits reserved):** Unused/reserved.
-     * - **PASSWD (8 bits):** Password field required to modify the clock control registers.
-     */
-    struct GPCTL
-    {
-        char SRC : 4;      ///< Clock source selection.
-        char ENAB : 1;     ///< Enable bit: set to enable the clock.
-        char KILL : 1;     ///< Kill bit: set to force the clock off.
-        char : 1;          ///< Reserved bit.
-        char BUSY : 1;     ///< Busy status flag.
-        char FLIP : 1;     ///< Flip flag for phase inversion.
-        char MASH : 2;     ///< MASH filter setting.
-        unsigned int : 13; ///< Reserved bits.
-        char PASSWD : 8;   ///< Password for register modifications.
-    };
-
-    /**
-     * @brief DMA Engine Status Registers.
-     *
-     * This structure represents the status and control registers for the DMA engine.
-     * It is used to monitor and control DMA operations such as data transfers between
-     * memory and peripherals. These registers are critical when setting up and debugging
-     * DMA transfers, such as those involved in transmitting radio signals by manipulating
-     * the PLLD and routing output to GPIO.
-     *
-     * @var DMAregs::CS
-     *      Control/Status register: Holds flags for starting, resetting, and error states.
-     * @var DMAregs::CONBLK_AD
-     *      Current control block address: Points to the next DMA control block in the chain.
-     * @var DMAregs::TI
-     *      Transfer Information register: Contains configuration flags and settings for the current transfer.
-     * @var DMAregs::SOURCE_AD
-     *      Source Address register: Specifies the memory address to read data from.
-     * @var DMAregs::DEST_AD
-     *      Destination Address register: Specifies the memory address to write data to.
-     * @var DMAregs::TXFR_LEN
-     *      Transfer Length register: Indicates the number of bytes to transfer.
-     * @var DMAregs::STRIDE
-     *      Stride register: Determines the address increment between consecutive transfers.
-     * @var DMAregs::NEXTCONBK
-     *      Next Control Block register: Contains the address of the next control block, enabling chained transfers.
-     * @var DMAregs::DEBUG
-     *      Debug register: Provides information useful for debugging DMA operations.
-     */
-    struct DMAregs
-    {
-        volatile unsigned int CS;        ///< Control/Status register.
-        volatile unsigned int CONBLK_AD; ///< Address of the current control block.
-        volatile unsigned int TI;        ///< Transfer Information register.
-        volatile unsigned int SOURCE_AD; ///< Source address for data transfer.
-        volatile unsigned int DEST_AD;   ///< Destination address for data transfer.
-        volatile unsigned int TXFR_LEN;  ///< Transfer length (in bytes).
-        volatile unsigned int STRIDE;    ///< Stride for address increment.
-        volatile unsigned int NEXTCONBK; ///< Address of the next control block.
-        volatile unsigned int DEBUG;     ///< Debug register for diagnostics.
-    };
 
     /**
      * @brief Random frequency offset for standard WSPR transmissions.
@@ -853,11 +542,321 @@ private:
      *   - 6 → 14 mA
      *   - 7 → 16 mA
      *
-     * @note This table is used internally by getGPIOPowermW() and is not exposed
+     * @note This table is used internally by get_gpio_power_mw() and is not exposed
      *       in the public interface unless declared in a header.
      */
     static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
         2, 4, 6, 8, 10, 12, 14, 16};
+
+    /**
+     * @brief Structure containing parameters for a WSPR transmission.
+     *
+     * This structure encapsulates all the necessary parameters required to configure
+     * and execute a WSPR transmission, including the message, transmission frequency,
+     * symbol time, tone spacing, and the DMA frequency lookup table.
+     */
+    struct WsprTransmissionParams
+    {
+        static const std::size_t symbol_count = MSG_SIZE;
+        std::array<uint8_t, symbol_count> symbols;
+
+        std::string call_sign;              ///< Callsign of operator
+        std::string grid_square;            ///< Maidenhead grid square of origination
+        int power_dbm;                      ///< Reported transmission power in dBm
+        double frequency;                   ///< Transmission frequency in Hz.
+        double ppm;                         ///< Current system PPM adjustment
+        bool is_tone;                       ///< Is test tone
+        int power;                          ///< GPIO power level 0-7
+        WsprMode wspr_mode;                 ///< WSPR mode for the frequency.
+        double symtime;                     ///< Duration of each symbol in seconds.
+        double tone_spacing;                ///< Frequency spacing between adjacent tones in Hz.
+        std::vector<double> dma_table_freq; ///< DMA frequency lookup table.
+        bool use_offset;                    ///< Use random offset on transmissions
+
+        /**
+         * @brief Default constructor for WsprTransmissionParams.
+         *
+         * Initializes the transmission parameters with default values.
+         */
+        WsprTransmissionParams()
+            : symbols{},
+              frequency(0.0),
+              is_tone(false),
+              power(0),
+              wspr_mode(WsprMode::WSPR2),
+              symtime(0.0),
+              tone_spacing(0.0),
+              dma_table_freq(1024, 0.0),
+              use_offset(false)
+        {
+        }
+    };
+
+    /**
+     * @brief Global instance of transmission parameters for WSPR.
+     *
+     * This global variable holds the current settings used for a WSPR transmission,
+     * including the WSPR message, transmission frequency, symbol time, tone spacing,
+     * and the DMA frequency lookup table.
+     */
+    struct WsprTransmissionParams trans_params_;
+
+    /**
+     * @brief DMA configuration and saved state for transmission setup/cleanup.
+     *
+     * @details Stores both the nominal and (PPM‑corrected) PLLD clock frequencies,
+     *          mailbox memory flags, the virtual base address for peripheral access,
+     *          and the original register values that must be restored when
+     *          tearing down DMA/PWM configuration.
+     */
+    struct DMAConfig
+    {
+        double plld_nominal_freq;      ///< PLLD clock frequency in Hz before any PPM correction.
+        double plld_clock_frequency;   ///< PLLD clock frequency in Hz after PPM correction.
+        int mem_flag;                  ///< Mailbox memory allocation flags for DMA.
+        void *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
+        uint32_t orig_gp0ctl;          ///< Saved GP0CTL register (clock control).
+        uint32_t orig_gp0div;          ///< Saved GP0DIV register (clock divider).
+        uint32_t orig_pwm_ctl;         ///< Saved PWM control register.
+        uint32_t orig_pwm_sta;         ///< Saved PWM status register.
+        uint32_t orig_pwm_rng1;        ///< Saved PWM range register 1.
+        uint32_t orig_pwm_rng2;        ///< Saved PWM range register 2.
+        uint32_t orig_pwm_fifocfg;     ///< Saved PWM FIFO configuration register.
+
+        /**
+         * @brief Construct a new DMAConfig with default (nominal) settings.
+         *
+         * @details Initializes:
+         *   - `plld_nominal_freq` to 500 MHz with the built‑in 2.5 ppm correction.
+         *   - `plld_clock_frequency` equal to `plld_nominal_freq`.
+         *   - `mem_flag` to the default mailbox flag.
+         *   - All pointers and saved‑register fields to zero or nullptr.
+         */
+        DMAConfig()
+            : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
+              plld_clock_frequency(plld_nominal_freq),
+              mem_flag(0x0c),
+              peripheral_base_virtual(nullptr),
+              orig_gp0ctl(0),
+              orig_gp0div(0),
+              orig_pwm_ctl(0),
+              orig_pwm_sta(0),
+              orig_pwm_rng1(0),
+              orig_pwm_rng2(0),
+              orig_pwm_fifocfg(0)
+        {
+        }
+    };
+
+    /**
+     * @brief Global configuration object.
+     *
+     * This DMAConfig instance holds the transmission functionality global objects.
+     */
+    struct DMAConfig dma_config_;
+
+    /**
+     * @brief Global mailbox structure for Broadcom mailbox communication.
+     *
+     * This static structure stores information related to the Broadcom mailbox interface,
+     * which is used for allocating, locking, and mapping physical memory for DMA operations.
+     * It is declared as a file-scope static variable so that exit handlers and other parts
+     * of the program can access its members.
+     *
+     * @var mailbox_::handle
+     *      Mailbox handle obtained from mbox_open(), used for communication with the mailbox.
+     * @var mailbox_::mem_ref
+     *      Memory reference returned by mem_alloc(), identifying the allocated memory block.
+     * @var mailbox_::bus_addr
+     *      Bus address of the allocated memory, obtained from mem_lock().
+     * @var mailbox_::virt_addr
+     *      Virtual address mapped to the allocated physical memory via mapmem().
+     * @var mailbox_::pool_size
+     *      The total number of memory pages allocated in the pool.
+     * @var mailbox_::pool_cnt
+     *      The count of memory pages that have been allocated from the pool so far.
+     */
+    struct Mailbox
+    {
+        int handle = -1;       ///< mailbox fd
+        unsigned mem_ref = 0;  ///< mem_alloc()
+        unsigned bus_addr = 0; ///< mem_lock()
+        unsigned char *virt_addr = nullptr;
+        unsigned pool_size = 0; ///< total DMA pages
+        unsigned pool_cnt = 0;  ///< pages handed out
+    };
+
+    /**
+     * @brief Mailbox state for DMA memory management.
+     *
+     * This member holds the mailbox handle (from mbox_open()), the memory
+     * reference ID (from mem_alloc()), the bus address (from mem_lock()),
+     * the virtual address pointer (from mapmem()), and the pool parameters
+     * for page allocation.
+     */
+    Mailbox mailbox_;
+
+    /**
+     * @brief Control Block (CB) structure for DMA engine commands.
+     *
+     * This struct defines the fields the DMA engine reads to perform a
+     * transfer: control bits, source/destination addresses, transfer length,
+     * optional 2D stride, and chaining to the next block. Reserved fields
+     * must be zero.
+     */
+    struct CB
+    {
+        volatile unsigned int TI;        ///< Transfer Information field for DMA control.
+        volatile unsigned int SOURCE_AD; ///< Source bus address for the DMA transfer.
+        volatile unsigned int DEST_AD;   ///< Destination bus address for the DMA transfer.
+        volatile unsigned int TXFR_LEN;  ///< Length (in bytes) of the transfer.
+        volatile unsigned int STRIDE;    ///< 2D stride value (unused if single block).
+        volatile unsigned int NEXTCONBK; ///< Bus address of the next CB in the chain.
+        volatile unsigned int RES1;      ///< Reserved, must be zero.
+        volatile unsigned int RES2;      ///< Reserved, must be zero.
+    };
+
+    /**
+     * @brief Control structure for the clock generator.
+     *
+     * This structure is used to configure the clock generator on the Raspberry Pi,
+     * which is essential for transmitting radio signals by manipulating the PLLD clock
+     * and routing the output to a GPIO pin.
+     *
+     * The bit-fields in this structure allow you to set the clock source, enable or disable
+     * the clock, force the clock off (kill), check the busy status, flip the output phase,
+     * set the MASH filter (which affects clock stability), and provide the required password
+     * to modify the control registers.
+     *
+     * Bit-field breakdown:
+     * - **SRC (4 bits):** Clock source selection.
+     * - **ENAB (1 bit):** Enable bit. Set to 1 to enable the clock.
+     * - **KILL (1 bit):** Kill bit. Set to 1 to force the clock off.
+     * - **(1 bit reserved):** Unused.
+     * - **BUSY (1 bit):** Busy status. Indicates if the clock generator is active.
+     * - **FLIP (1 bit):** Flip bit. May be used for phase inversion.
+     * - **MASH (2 bits):** MASH filter setting for noise shaping.
+     * - **(13 bits reserved):** Unused/reserved.
+     * - **PASSWD (8 bits):** Password field required to modify the clock control registers.
+     */
+    struct GPCTL
+    {
+        char SRC : 4;      ///< Clock source selection.
+        char ENAB : 1;     ///< Enable bit: set to enable the clock.
+        char KILL : 1;     ///< Kill bit: set to force the clock off.
+        char : 1;          ///< Reserved bit.
+        char BUSY : 1;     ///< Busy status flag.
+        char FLIP : 1;     ///< Flip flag for phase inversion.
+        char MASH : 2;     ///< MASH filter setting.
+        unsigned int : 13; ///< Reserved bits.
+        char PASSWD : 8;   ///< Password for register modifications.
+    };
+
+    /**
+     * @brief DMA Engine Status Registers.
+     *
+     * This structure represents the status and control registers for the DMA engine.
+     * It is used to monitor and control DMA operations such as data transfers between
+     * memory and peripherals. These registers are critical when setting up and debugging
+     * DMA transfers, such as those involved in transmitting radio signals by manipulating
+     * the PLLD and routing output to GPIO.
+     *
+     * @var DMAregs::CS
+     *      Control/Status register: Holds flags for starting, resetting, and error states.
+     * @var DMAregs::CONBLK_AD
+     *      Current control block address: Points to the next DMA control block in the chain.
+     * @var DMAregs::TI
+     *      Transfer Information register: Contains configuration flags and settings for the current transfer.
+     * @var DMAregs::SOURCE_AD
+     *      Source Address register: Specifies the memory address to read data from.
+     * @var DMAregs::DEST_AD
+     *      Destination Address register: Specifies the memory address to write data to.
+     * @var DMAregs::TXFR_LEN
+     *      Transfer Length register: Indicates the number of bytes to transfer.
+     * @var DMAregs::STRIDE
+     *      Stride register: Determines the address increment between consecutive transfers.
+     * @var DMAregs::NEXTCONBK
+     *      Next Control Block register: Contains the address of the next control block, enabling chained transfers.
+     * @var DMAregs::DEBUG
+     *      Debug register: Provides information useful for debugging DMA operations.
+     */
+    struct DMAregs
+    {
+        volatile unsigned int CS;        ///< Control/Status register.
+        volatile unsigned int CONBLK_AD; ///< Address of the current control block.
+        volatile unsigned int TI;        ///< Transfer Information register.
+        volatile unsigned int SOURCE_AD; ///< Source address for data transfer.
+        volatile unsigned int DEST_AD;   ///< Destination address for data transfer.
+        volatile unsigned int TXFR_LEN;  ///< Transfer length (in bytes).
+        volatile unsigned int STRIDE;    ///< Stride for address increment.
+        volatile unsigned int NEXTCONBK; ///< Address of the next control block.
+        volatile unsigned int DEBUG;     ///< Debug register for diagnostics.
+    };
+
+    /**
+     * @brief Perform DMA-driven RF transmission.
+     *
+     * @details
+     *   1. Records the start time as a reference for symbol scheduling.
+     *   2. Enables the PWM clock and DMA engine for transmission.
+     *   3. If in tone mode, continuously transmits a fixed‑frequency test tone.
+     *   4. Otherwise, transmits each WSPR symbol in sequence, using gettimeofday()
+     *      and `timeval_subtract()` to schedule precise symbol timing.
+     *   5. Disables transmission when complete.
+     *
+     * @note In tone mode (`trans_params_.is_tone == true`), this function only
+     *       returns via SIGINT.
+     */
+    void transmit();
+
+    /**
+     * @brief Waits for the background transmission thread to finish.
+     *
+     * @details If the transmission thread was launched via
+     *          startTransmission(), this call will block until
+     *          that thread has completed and joined. After returning,
+     *          tx_thread_ is no longer joinable.
+     */
+    void join_transmission();
+
+    /**
+     * @brief Clean up DMA and mailbox resources.
+     *
+     * @details Performs teardown in the following order:
+     *   1. Prevent multiple invocations.
+     *   2. Stop any ongoing DMA transfers and disable the PWM clock.
+     *   3. Restore saved clock and PWM register values.
+     *   4. Reset the DMA controller.
+     *   5. Unmap the peripheral base address region.
+     *   6. Deallocate mailbox memory pages.
+     *   7. Close the mailbox handle.
+     *   8. Remove the local device file.
+     *   9. Reset all configuration data to defaults.
+     *
+     * @note This function is idempotent; subsequent calls are no‑ops.
+     */
+    void dma_cleanup();
+
+    /**
+     * @brief Get the GPIO drive strength in milliamps.
+     *
+     * Maps a drive strength level (0–7) to its corresponding current drive
+     * capability in milliamps (mA).
+     *
+     * @param level Drive strength level (0–7).
+     * @return int   Drive strength in mA.
+     * @throws std::out_of_range if level is outside the [0,7] range.
+     */
+    constexpr int get_gpio_power_mw(int level);
+
+    /**
+     * @brief Convert power in milliwatts to decibels referenced to 1 mW (dBm).
+     *
+     * @param mw  Power in milliwatts. Must be greater than 0.
+     * @return    Power in dBm.
+     * @throws    std::domain_error if mw is not positive.
+     */
+    inline double convert_mw_dbm(double mw);
 
     /**
      * @brief Calculates the virtual address for a given bus address.
