@@ -747,18 +747,19 @@ private:
      * - **(13 bits reserved):** Unused/reserved.
      * - **PASSWD (8 bits):** Password field required to modify the clock control registers.
      */
-    struct GPCTL
-    {
-        char SRC : 4;      ///< Clock source selection.
-        char ENAB : 1;     ///< Enable bit: set to enable the clock.
-        char KILL : 1;     ///< Kill bit: set to force the clock off.
-        char : 1;          ///< Reserved bit.
-        char BUSY : 1;     ///< Busy status flag.
-        char FLIP : 1;     ///< Flip flag for phase inversion.
-        char MASH : 2;     ///< MASH filter setting.
-        unsigned int : 13; ///< Reserved bits.
-        char PASSWD : 8;   ///< Password for register modifications.
-    };
+     struct GPCTL
+     {
+         uint32_t SRC    : 4;  ///< Clock source selection.
+         uint32_t ENAB   : 1;  ///< Enable bit.
+         uint32_t KILL   : 1;  ///< Kill bit.
+         uint32_t        : 1;  ///< Reserved.
+         uint32_t BUSY   : 1;  ///< Busy flag.
+         uint32_t FLIP   : 1;  ///< Phase inversion flag.
+         uint32_t MASH   : 2;  ///< MASH filter.
+         uint32_t        : 13; ///< Reserved.
+         uint32_t PASSWD : 8;  ///< Password field.
+     };
+     static_assert(sizeof(GPCTL) == 4, "GPCTL must be exactly 32 bits.");
 
     /**
      * @brief DMA Engine Status Registers.
