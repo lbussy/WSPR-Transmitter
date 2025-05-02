@@ -1148,55 +1148,32 @@ private:
         std::chrono::system_clock::time_point nextEvent() const
         {
             using namespace std::chrono;
-            auto now = system_clock::now();
-            std::time_t t = system_clock::to_time_t(now);
-            std::tm tm = *std::localtime(&t);
 
-            // pick the next window
-            if (parent_->trans_params_.wspr_mode == WsprMode::WSPR15)
-            {
-                // quarter hours: 0,15,30,45
-                int q = (tm.tm_min / 15);
-                if (tm.tm_min % 15 == 0 && tm.tm_sec < 1)
-                {
-                    // same quarter
-                }
-                else
-                {
-                    if (++q >= 4)
-                    {
-                        q = 0;
-                        tm.tm_hour = (tm.tm_hour + 1) % 24;
-                    }
-                    tm.tm_min = q * 15;
-                }
+            // “now” and its epoch‐seconds
+            auto now    = system_clock::now();
+            auto secs   = duration_cast<seconds>(now.time_since_epoch()).count();
+
+            // Choose cycle length: 2 min = 120 s or 15 min = 900 s
+            const int cycle = (parent_->trans_params_.wspr_mode == WsprMode::WSPR15)
+                                ? 15 * 60
+                                : 2  * 60;
+
+            // Integer‐divide to find current cycle index
+            auto idx = secs / cycle;
+
+            // If we’re already within the first second of this window, fire now+1s,
+            // otherwise bump to the next cycle:
+            auto base = idx * cycle;
+            seconds target_secs;
+            if (secs < base + 1) {
+                // still before “:XX:01” of this cycle
+                target_secs = seconds{base + 1};
+            } else {
+                // past “:XX:01”, schedule at next cycle’s +1s
+                target_secs = seconds{(idx + 1) * cycle + 1};
             }
-            else
-            {
-                // even minutes
-                int m = tm.tm_min;
-                if (m % 2 == 0 && tm.tm_sec < 1)
-                {
-                    // same
-                }
-                else
-                {
-                    if ((m % 2) != 0)
-                        ++m;
-                    else
-                        m += 2;
-                    if (m >= 60)
-                    {
-                        m -= 60;
-                        tm.tm_hour = (tm.tm_hour + 1) % 24;
-                    }
-                    tm.tm_min = m;
-                }
-            }
-            tm.tm_sec = 1;
-            tm.tm_isdst = -1;
-            auto next_t = std::mktime(&tm);
-            return system_clock::from_time_t(next_t);
+
+            return system_clock::time_point{target_secs};
         }
 
         /// The scheduler loop
