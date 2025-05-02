@@ -63,81 +63,141 @@ constexpr const bool debug = true;
 constexpr const bool debug = false;
 #endif
 
-// Helper Class/Struct
-// namespace
-// {
-//     // RAII for mmap’d peripheral region
-//     class MMapRegion
-//     {
-//         void *ptr_;
-//         size_t size_;
+/**
+ * @file wspr_transmit.cpp - anonymous namespace
+ * @brief Helpers for peripheral base discovery, mmap and mailbox RAII.
+ */
+namespace
+{
+    /**
+    * @brief Read a 4-byte big-endian integer from a device-tree file.
+    *
+    * Attempts to open the given file in binary mode, seek to the specified
+    * offset, and read 4 bytes. Returns std::nullopt on any I/O error.
+    *
+    * @param file The path to the device-tree property file.
+    * @param off  Byte offset within the file to read from.
+    * @return std::optional<uint32_t> The 32-bit big-endian value, or nullopt.
+    */
+    static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
+    {
+        std::ifstream f(file, std::ios::binary);
+        if (!f)
+            return std::nullopt;
+        f.seekg(off);
+        uint8_t buf[4];
+        if (f.read(reinterpret_cast<char*>(buf), sizeof(buf))) {
+            return (uint32_t(buf[0]) << 24)
+                | (uint32_t(buf[1]) << 16)
+                | (uint32_t(buf[2]) <<  8)
+                |  uint32_t(buf[3]);
+        }
+        return std::nullopt;
+    }
 
-//     public:
-//         MMapRegion(int mem_fd, off_t offset, size_t size)
-//             : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, offset)), size_(size)
-//         {
-//             if (ptr_ == MAP_FAILED)
-//                 throw std::system_error(errno, std::generic_category(),
-//                                         "WsprTransmitter::setup_dma mmap");
-//         }
-//         ~MMapRegion()
-//         {
-//             if (ptr_)
-//                 munmap(ptr_, size_);
-//         }
+    /**
+    * @brief RAII wrapper for a memory-mapped I/O region.
+    *
+    * Maps a physical address range via /dev/mem on construction and
+    * unmaps it on destruction (unless released). Throws on mmap failure.
+    */
+    class MMapRegion
+    {
+        void*  ptr_;
+        size_t size_;
 
-//         MMapRegion(const MMapRegion &) = delete;
-//         MMapRegion &operator=(const MMapRegion &) = delete;
+    public:
+        /**
+        * @param fd     File descriptor for /dev/mem (must be open).
+        * @param offset Physical base address to map.
+        * @param size   Length of the region in bytes.
+        * @throws std::runtime_error on mmap failure.
+        */
+        MMapRegion(int fd, off_t offset, size_t size)
+            : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset)),
+            size_(size)
+        {
+            if (ptr_ == MAP_FAILED) {
+                throw std::runtime_error("MMapRegion: mmap failed: " + std::string(strerror(errno)));
+            }
+        }
 
-//         void *get() const { return ptr_; }
-//         void release() { ptr_ = nullptr; } // take ownership away
-//     };
+        /** Unmap the region unless it has been released. */
+        ~MMapRegion()
+        {
+            if (ptr_) {
+                munmap(ptr_, size_);
+            }
+        }
 
-//     // RAII for mailbox handle
-//     class MailboxHandle
-//     {
-//         int fd_;
+        /** @return The mapped pointer. */
+        void* get() const { return ptr_; }
 
-//     public:
-//         MailboxHandle() : fd_(mbox_open())
-//         {
-//             if (fd_ < 0)
-//                 throw std::runtime_error("mbox_open failed");
-//         }
-//         ~MailboxHandle()
-//         {
-//             if (fd_ >= 0)
-//                 mbox_close(fd_);
-//         }
-//         int get() const { return fd_; }
-//         void release() { fd_ = -1; }
-//     };
+        /**
+        * @brief Release ownership so the destructor won't unmap.
+        *
+        * Call after transferring ptr_ to another owner (e.g., storing
+        * in dma_config_), otherwise the region is unmapped.
+        */
+        void release() { ptr_ = nullptr; }
+    };
 
-//     // Read 4 bytes from device-tree and interpret big-endian
-//     static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
-//     {
-//         std::ifstream f(file, std::ios::binary);
-//         if (!f)
-//             return std::nullopt;
-//         f.seekg(off);
-//         uint8_t buf[4];
-//         if (f.read(reinterpret_cast<char *>(buf), 4))
-//             return (uint32_t(buf[0]) << 24) | (uint32_t(buf[1]) << 16) | (uint32_t(buf[2]) << 8) | uint32_t(buf[3]);
-//         return std::nullopt;
-//     }
+    /**
+    * @brief RAII wrapper for Broadcom mailbox handle.
+    *
+    * Opens the mailbox in the ctor and closes it in the dtor. Throws
+    * if mbox_open() fails.
+    */
+    class MailboxHandle
+    {
+        int fd_;
 
-//     // the helper you actually call below:
-//     static off_t discover_peripheral_base()
-//     {
-//         // default fallback
-//         uint32_t base = 0x20000000;
-//         if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0)
-//             base = *v;
-//         else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v)
-//             base = *v;
-//         return static_cast<off_t>(base);
-//     }
-// } // anonymous
+    public:
+        MailboxHandle()
+            : fd_(mbox_open())
+        {
+            if (fd_ < 0) {
+                throw std::runtime_error("MailboxHandle: mbox_open failed");
+            }
+        }
+
+        ~MailboxHandle()
+        {
+            if (fd_ >= 0) {
+                mbox_close(fd_);
+            }
+        }
+
+        /** @return The mailbox file descriptor. */
+        int get() const { return fd_; }
+
+        /**
+        * @brief Release ownership so the destructor won't close.
+        *
+        * Use after transferring fd_ to mailbox_.handle.
+        */
+        void release() { fd_ = -1; }
+    };
+
+    /**
+    * @brief Determine the peripheral base address from the device tree.
+    *
+    * Reads the "ranges" property of the device tree at offsets 4 and 8 to
+    * discover the SOC peripheral base. Falls back to 0x2000_0000 if unavailable.
+    *
+    * @return The bus address to pass as the mmap offset.
+    */
+    static off_t discover_peripheral_base()
+    {
+        uint32_t base = 0x20000000;
+        if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0) {
+            base = *v;
+        } else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v) {
+            base = *v;
+        }
+        return static_cast<off_t>(base);
+    }
+} // anonymous namespace 
 
 /**
  * @brief Global instance of the WSPR transmitter.
@@ -847,77 +907,6 @@ int WsprTransmitter::symbol_timeval_subtract(struct timeval *result, const struc
 }
 
 /**
- * @brief Maps peripheral base address to virtual memory.
- *
- * Reads the Raspberry Pi's device tree to determine the peripheral base
- * address, then memory-maps that region for access via virtual memory.
- *
- * This is used for low-level register access to GPIO, clocks, DMA, etc.
- *
- * @param[out] dma_config_.peripheral_base_virtual Reference to a pointer that will
- *             be set to the mapped virtual memory address.
- *
- * @throws Terminates the program if the peripheral base cannot be determined,
- *         `/dev/mem` cannot be opened, or `mmap` fails.
- */
- void WsprTransmitter::setup_peripheral_base_virtual()
- {
-     auto read_dt_range = [](const std::string &filename, unsigned offset) -> std::optional<unsigned>
-     {
-         std::ifstream file(filename, std::ios::binary);
-         if (!file)
-             return std::nullopt;
- 
-         file.seekg(offset);
-         if (!file.good())
-             return std::nullopt;
- 
-         unsigned char buf[4] = {};
-         file.read(reinterpret_cast<char *>(buf), sizeof(buf));
-         if (file.gcount() != sizeof(buf))
-             return std::nullopt;
- 
-         // Big‑endian to host‑endian conversion
-         return (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
-     };
- 
-     unsigned peripheral_base = 0x20000000; // Default fallback
-     if (auto addr = read_dt_range("/proc/device-tree/soc/ranges", 4); addr && *addr != 0)
-     {
-         peripheral_base = *addr;
-     }
-     else if (auto addr = read_dt_range("/proc/device-tree/soc/ranges", 8); addr)
-     {
-         peripheral_base = *addr;
-     }
- 
-     int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-     if (mem_fd < 0)
-     {
-         throw std::runtime_error("Error: Cannot open /dev/mem.");
-     }
- 
-     // mmap returns void*, so assign directly
-     dma_config_.peripheral_base_virtual = mmap(
-         nullptr,
-         0x01000000,             // 16 MB
-         PROT_READ | PROT_WRITE, // read/write
-         MAP_SHARED,
-         mem_fd,
-         peripheral_base);
-     close(mem_fd);
- 
-     if (!dma_config_.peripheral_base_virtual)
-         throw std::runtime_error("peripheral_base_virtual not initialized");
- 
-     // Check against MAP_FAILED, not –1
-     if (dma_config_.peripheral_base_virtual == MAP_FAILED)
-     {
-         throw std::runtime_error("Error: peripheral_base_virtual mmap failed.");
-     }
- }
-
-/**
  * @brief Initialize DMAConfig PLLD frequencies and mailbox memory flag.
  *
  * @details
@@ -1579,35 +1568,48 @@ void WsprTransmitter::create_dma_pages(
  * @throws std::runtime_error if peripheral memory mapping fails.
  * @throws std::runtime_error if mailbox opening fails.
  */
- void WsprTransmitter::setup_dma()
- {
-     // 1) Retrieve PLLD frequency and mailbox flag
-     get_plld_and_memflag();
- 
-     // 2) Map peripherals via /dev/mem
-     setup_peripheral_base_virtual();
-     // (that method should set dma_config_.peripheral_base_virtual for you)
- 
-     // 3) Snapshot registers for cleanup
-     dma_config_.orig_gp0ctl     = access_bus_address(CM_GP0CTL_BUS);
-     dma_config_.orig_gp0div     = access_bus_address(CM_GP0DIV_BUS);
-     dma_config_.orig_pwm_ctl    = access_bus_address(PWM_BUS_BASE + 0x00);
-     dma_config_.orig_pwm_sta    = access_bus_address(PWM_BUS_BASE + 0x04);
-     dma_config_.orig_pwm_rng1   = access_bus_address(PWM_BUS_BASE + 0x10);
-     dma_config_.orig_pwm_rng2   = access_bus_address(PWM_BUS_BASE + 0x20);
-     dma_config_.orig_pwm_fifocfg= access_bus_address(PWM_BUS_BASE + 0x08);
- 
-     // 4) Open the mailbox
-     mailbox_.handle = mbox_open();
-     if (mailbox_.handle < 0)
-         throw std::runtime_error("setup_dma: mbox_open failed");
- 
-     // 5) Allocate and build DMA pages
-     create_dma_pages(const_page_, instr_page_, instructions_);
- 
-     // 6) Mark ready
-     dma_setup_done_ = true;
- }
+void WsprTransmitter::setup_dma()
+{
+    // 1) PLLD & mailbox flag
+    get_plld_and_memflag();
+
+    // 2) open /dev/mem for mapping
+    int mem_fd = ::open("/dev/mem", O_RDWR|O_SYNC);
+    if (mem_fd < 0)
+        throw std::runtime_error(std::string("setup_dma: open(/dev/mem) failed: ")
+                                + std::strerror(errno));
+
+    // 3) RAII-map the peripheral block
+    constexpr size_t MAP_SIZE = 0x01000000;
+    MMapRegion region(mem_fd, discover_peripheral_base(), MAP_SIZE);
+    ::close(mem_fd);  // safe to close the fd once mapped
+
+    // 4) RAII-open the mailbox
+    MailboxHandle mbox;
+
+    // 5) everything so far succeeded → snapshot registers
+    dma_config_.peripheral_base_virtual = region.get();
+    dma_config_.orig_gp0ctl      = access_bus_address(CM_GP0CTL_BUS);
+    dma_config_.orig_gp0div      = access_bus_address(CM_GP0DIV_BUS);
+    dma_config_.orig_pwm_ctl     = access_bus_address(PWM_BUS_BASE + 0x00);
+    dma_config_.orig_pwm_sta     = access_bus_address(PWM_BUS_BASE + 0x04);
+    dma_config_.orig_pwm_rng1    = access_bus_address(PWM_BUS_BASE + 0x10);
+    dma_config_.orig_pwm_rng2    = access_bus_address(PWM_BUS_BASE + 0x20);
+    dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
+
+    // 6) commit the mailbox handle
+    mailbox_.handle = mbox.get();
+
+    // 7) build your DMA pages (this may still throw)
+    create_dma_pages(const_page_, instr_page_, instructions_);
+
+    // 8) release RAII ownership so we keep the raw values alive
+    region.release();
+    mbox.release();
+
+    // 9) mark setup complete
+    dma_setup_done_ = true;
+}
 
 /**
  * @brief Configures the DMA frequency table for signal generation.
