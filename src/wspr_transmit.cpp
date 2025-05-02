@@ -398,19 +398,22 @@ void WsprTransmitter::stopTransmission()
 }
 
 /**
- * @brief Gracefully stops and waits for the transmission thread.
+ * @brief Completely tear down the transmitter and clean up all resources.
  *
- * @details Combines stopTransmission() to signal the worker thread to
- *          exit, and join_transmission() to block until that thread has
- *          fully terminated. After this call returns, no transmission
- *          thread remains running.
+ * @details
+ *   This call performs a full shutdown of both scheduled and in-progress
+ *   transmissions. It invokes disableTransmission() to stop the scheduler
+ *   and any running transmit thread, then joins the thread to ensure it has
+ *   fully exited, and finally calls dma_cleanup() to unmap peripherals,
+ *   free DMA memory, and restore hardware registers. Upon return, no
+ *   transmission threads are running and all DMA/PWM resources have been
+ *   cleaned up.
  */
-void WsprTransmitter::shutdownTransmitter()
-{
-    stopTransmission();
-    join_transmission();
-    dma_cleanup();
-}
+ void WsprTransmitter::shutdownTransmitter()
+ {
+     disableTransmission();
+     dma_cleanup();
+ }
 
 /**
  * @brief Check if the GPIO is bound to the clock.
