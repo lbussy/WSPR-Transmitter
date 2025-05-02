@@ -949,6 +949,22 @@ private:
     void get_plld_and_memflag();
 
     /**
+     * @brief Maps peripheral base address to virtual memory.
+     *
+     * Reads the Raspberry Pi's device tree to determine the peripheral base
+     * address, then memory-maps that region for access via virtual memory.
+     *
+     * This is used for low-level register access to GPIO, clocks, DMA, etc.
+     *
+     * @param[out] dma_config_.peripheral_base_virtual Reference to a pointer that will
+     *             be set to the mapped virtual memory address.
+     *
+     * @throws Terminates the program if the peripheral base cannot be determined,
+     *         `/dev/mem` cannot be opened, or `mmap` fails.
+     */
+     void setup_peripheral_base_virtual();
+
+    /**
      * @brief Allocate a pool of DMA‑capable memory pages.
      *
      * @details Uses the Broadcom mailbox interface to:

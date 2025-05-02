@@ -55,7 +55,7 @@ extern "C"
 #include <sys/mman.h> // mmap, munmap, MAP_SHARED, PROT_READ/WRITE
 #include <sys/stat.h> // struct stat, stat()
 #include <sys/time.h> // gettimeofday(), struct timeval
-#include <unistd.h>   // close(), unlink()
+#include <unistd.h>   // usleep(), close(), unlink()
 
 #ifdef DEBUG_WSPR_TRANSMIT
 constexpr const bool debug = true;
@@ -64,81 +64,80 @@ constexpr const bool debug = false;
 #endif
 
 // Helper Class/Struct
-namespace
-{
-    // RAII for mmap’d peripheral region
-    class MMapRegion
-    {
-        void *ptr_;
-        size_t size_;
+// namespace
+// {
+//     // RAII for mmap’d peripheral region
+//     class MMapRegion
+//     {
+//         void *ptr_;
+//         size_t size_;
 
-    public:
-        MMapRegion(int mem_fd, off_t offset, size_t size)
-            : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, offset)), size_(size)
-        {
-            if (ptr_ == MAP_FAILED)
-                throw std::system_error(errno, std::generic_category(),
-                                        "WsprTransmitter::setup_dma mmap");
-        }
-        ~MMapRegion()
-        {
-            if (ptr_)
-                munmap(ptr_, size_);
-        }
+//     public:
+//         MMapRegion(int mem_fd, off_t offset, size_t size)
+//             : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, offset)), size_(size)
+//         {
+//             if (ptr_ == MAP_FAILED)
+//                 throw std::system_error(errno, std::generic_category(),
+//                                         "WsprTransmitter::setup_dma mmap");
+//         }
+//         ~MMapRegion()
+//         {
+//             if (ptr_)
+//                 munmap(ptr_, size_);
+//         }
 
-        MMapRegion(const MMapRegion &) = delete;
-        MMapRegion &operator=(const MMapRegion &) = delete;
+//         MMapRegion(const MMapRegion &) = delete;
+//         MMapRegion &operator=(const MMapRegion &) = delete;
 
-        void *get() const { return ptr_; }
-        void release() { ptr_ = nullptr; } // take ownership away
-    };
+//         void *get() const { return ptr_; }
+//         void release() { ptr_ = nullptr; } // take ownership away
+//     };
 
-    // RAII for mailbox handle
-    class MailboxHandle
-    {
-        int fd_;
+//     // RAII for mailbox handle
+//     class MailboxHandle
+//     {
+//         int fd_;
 
-    public:
-        MailboxHandle() : fd_(mbox_open())
-        {
-            if (fd_ < 0)
-                throw std::runtime_error("mbox_open failed");
-        }
-        ~MailboxHandle()
-        {
-            if (fd_ >= 0)
-                mbox_close(fd_);
-        }
-        int get() const { return fd_; }
-        void release() { fd_ = -1; }
-    };
+//     public:
+//         MailboxHandle() : fd_(mbox_open())
+//         {
+//             if (fd_ < 0)
+//                 throw std::runtime_error("mbox_open failed");
+//         }
+//         ~MailboxHandle()
+//         {
+//             if (fd_ >= 0)
+//                 mbox_close(fd_);
+//         }
+//         int get() const { return fd_; }
+//         void release() { fd_ = -1; }
+//     };
 
-    // Read 4 bytes from device-tree and interpret big-endian
-    static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
-    {
-        std::ifstream f(file, std::ios::binary);
-        if (!f)
-            return std::nullopt;
-        f.seekg(off);
-        uint8_t buf[4];
-        if (f.read(reinterpret_cast<char *>(buf), 4))
-            return (uint32_t(buf[0]) << 24) | (uint32_t(buf[1]) << 16) | (uint32_t(buf[2]) << 8) | uint32_t(buf[3]);
-        return std::nullopt;
-    }
+//     // Read 4 bytes from device-tree and interpret big-endian
+//     static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
+//     {
+//         std::ifstream f(file, std::ios::binary);
+//         if (!f)
+//             return std::nullopt;
+//         f.seekg(off);
+//         uint8_t buf[4];
+//         if (f.read(reinterpret_cast<char *>(buf), 4))
+//             return (uint32_t(buf[0]) << 24) | (uint32_t(buf[1]) << 16) | (uint32_t(buf[2]) << 8) | uint32_t(buf[3]);
+//         return std::nullopt;
+//     }
 
-    // the helper you actually call below:
-    static off_t discover_peripheral_base()
-    {
-        // default fallback
-        uint32_t base = 0x20000000;
-        if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0)
-            base = *v;
-        else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v)
-            base = *v;
-        return static_cast<off_t>(base);
-    }
-
-} // anonymous
+//     // the helper you actually call below:
+//     static off_t discover_peripheral_base()
+//     {
+//         // default fallback
+//         uint32_t base = 0x20000000;
+//         if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0)
+//             base = *v;
+//         else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v)
+//             base = *v;
+//         return static_cast<off_t>(base);
+//     }
+// } // anonymous
 
 /**
  * @brief Global instance of the WSPR transmitter.
@@ -352,35 +351,18 @@ void WsprTransmitter::setThreadScheduling(int policy, int priority)
 }
 
 /**
- * @brief Start transmission, either immediately or via the scheduler.
+ * @brief Start the background scheduler that will fire at the next
+ *        WSPR window and launch the transmit thread.
  *
- * @details
- *   If `trans_params_.is_tone == true`, this will spawn the transmit
- *   thread right away (bypassing the scheduler). Otherwise it launches
- *   the background scheduler, which will fire at the next WSPR window
- *   and then spawn the transmit thread.
- *
- * @note This call is non-blocking. In tone mode it returns immediately
- *       after spawning the thread; in WSPR mode it returns immediately
- *       after starting the scheduler thread.
+ * @note This is non‐blocking: returns immediately, scheduler runs in
+ *       its own thread.
  */
- void WsprTransmitter::enableTransmission()
- {
-     stop_requested_.store(false, std::memory_order_release);
- 
-     if (trans_params_.is_tone)
-     {
-         // Tone mode: start right away
-         if (tx_thread_.joinable())
-             tx_thread_.join();
-         tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
-     }
-     else
-     {
-         // Scheduled WSPR mode
-         scheduler_.start();
-     }
- }
+void WsprTransmitter::enableTransmission()
+{
+    // Any in-flight tx should be clear
+    stop_requested_.store(false, std::memory_order_release);
+    scheduler_.start();
+}
 
 /**
  * @brief Cancels the scheduler (and any running transmission).
@@ -415,22 +397,19 @@ void WsprTransmitter::stopTransmission()
 }
 
 /**
- * @brief Completely tear down the transmitter and clean up all resources.
+ * @brief Gracefully stops and waits for the transmission thread.
  *
- * @details
- *   This call performs a full shutdown of both scheduled and in-progress
- *   transmissions. It invokes disableTransmission() to stop the scheduler
- *   and any running transmit thread, then joins the thread to ensure it has
- *   fully exited, and finally calls dma_cleanup() to unmap peripherals,
- *   free DMA memory, and restore hardware registers. Upon return, no
- *   transmission threads are running and all DMA/PWM resources have been
- *   cleaned up.
+ * @details Combines stopTransmission() to signal the worker thread to
+ *          exit, and join_transmission() to block until that thread has
+ *          fully terminated. After this call returns, no transmission
+ *          thread remains running.
  */
- void WsprTransmitter::shutdownTransmitter()
- {
-     disableTransmission();
-     dma_cleanup();
- }
+void WsprTransmitter::shutdownTransmitter()
+{
+    stopTransmission();
+    join_transmission();
+    dma_cleanup();
+}
 
 /**
  * @brief Check if the GPIO is bound to the clock.
@@ -868,6 +847,77 @@ int WsprTransmitter::symbol_timeval_subtract(struct timeval *result, const struc
 }
 
 /**
+ * @brief Maps peripheral base address to virtual memory.
+ *
+ * Reads the Raspberry Pi's device tree to determine the peripheral base
+ * address, then memory-maps that region for access via virtual memory.
+ *
+ * This is used for low-level register access to GPIO, clocks, DMA, etc.
+ *
+ * @param[out] dma_config_.peripheral_base_virtual Reference to a pointer that will
+ *             be set to the mapped virtual memory address.
+ *
+ * @throws Terminates the program if the peripheral base cannot be determined,
+ *         `/dev/mem` cannot be opened, or `mmap` fails.
+ */
+ void WsprTransmitter::setup_peripheral_base_virtual()
+ {
+     auto read_dt_range = [](const std::string &filename, unsigned offset) -> std::optional<unsigned>
+     {
+         std::ifstream file(filename, std::ios::binary);
+         if (!file)
+             return std::nullopt;
+ 
+         file.seekg(offset);
+         if (!file.good())
+             return std::nullopt;
+ 
+         unsigned char buf[4] = {};
+         file.read(reinterpret_cast<char *>(buf), sizeof(buf));
+         if (file.gcount() != sizeof(buf))
+             return std::nullopt;
+ 
+         // Big‑endian to host‑endian conversion
+         return (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
+     };
+ 
+     unsigned peripheral_base = 0x20000000; // Default fallback
+     if (auto addr = read_dt_range("/proc/device-tree/soc/ranges", 4); addr && *addr != 0)
+     {
+         peripheral_base = *addr;
+     }
+     else if (auto addr = read_dt_range("/proc/device-tree/soc/ranges", 8); addr)
+     {
+         peripheral_base = *addr;
+     }
+ 
+     int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
+     if (mem_fd < 0)
+     {
+         throw std::runtime_error("Error: Cannot open /dev/mem.");
+     }
+ 
+     // mmap returns void*, so assign directly
+     dma_config_.peripheral_base_virtual = mmap(
+         nullptr,
+         0x01000000,             // 16 MB
+         PROT_READ | PROT_WRITE, // read/write
+         MAP_SHARED,
+         mem_fd,
+         peripheral_base);
+     close(mem_fd);
+ 
+     if (!dma_config_.peripheral_base_virtual)
+         throw std::runtime_error("peripheral_base_virtual not initialized");
+ 
+     // Check against MAP_FAILED, not –1
+     if (dma_config_.peripheral_base_virtual == MAP_FAILED)
+     {
+         throw std::runtime_error("Error: peripheral_base_virtual mmap failed.");
+     }
+ }
+
+/**
  * @brief Initialize DMAConfig PLLD frequencies and mailbox memory flag.
  *
  * @details
@@ -1006,7 +1056,7 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
         // Debug output: Show allocated bus & virtual addresses
         std::cout << "DEBUG: allocate_memory_pool bus_addr=0x"
                   << std::hex << mailbox_.bus_addr
-                  << " virt_addr=0x" << reinterpret_cast<std::uintptr_t>(mailbox_.virt_addr)
+                  << " virt_addr=0x" << reinterpret_cast<unsigned long>(mailbox_.virt_addr)
                   << " mem_ref=0x" << mailbox_.mem_ref
                   << std::dec << std::endl;
     }
@@ -1080,27 +1130,31 @@ void WsprTransmitter::deallocate_memory_pool()
  * @details Clears the enable bit in the clock control register and waits
  *          until the clock is no longer busy. Ensures proper synchronization.
  */
- void WsprTransmitter::disable_clock()
- {
-     // Clear the “transmitting” flag
-     transmit_on_.store(false, std::memory_order_release);
+void WsprTransmitter::disable_clock()
+{
+    // Set semaphore
+    transmit_on_.store(false);
 
-     // If we never mapped peripherals, nothing to do
-     if (!dma_config_.peripheral_base_virtual)
-         return;
+    // Ensure memory-mapped peripherals are initialized before proceeding.
+    if (dma_config_.peripheral_base_virtual == nullptr)
+    {
+        return;
+    }
 
-     // Read, modify, and write back the clock‐control register to disable
-     auto ctl = access_bus_address(CM_GP0CTL_BUS);
-     ctl = (ctl & 0x7EF) | 0x5A000000;  // clear ENAB bit, OR in password
-     access_bus_address(CM_GP0CTL_BUS) = static_cast<int>(ctl);
+    // Read current clock settings from the clock control register.
+    auto settings = access_bus_address(CM_GP0CTL_BUS);
 
-     // Wait until the hardware “busy” bit (bit 7) clears
-     while (access_bus_address(CM_GP0CTL_BUS) & (1 << 7))
-     {
-         // gently yield to other threads, or sleep a tiny bit
-         std::this_thread::yield();
-     }
- }
+    // Disable the clock: clear the enable bit while preserving other settings.
+    // Apply the required password (0x5A000000) to modify the register.
+    settings = (settings & 0x7EF) | 0x5A000000;
+    access_bus_address(CM_GP0CTL_BUS) = static_cast<int>(settings);
+
+    // Wait until the clock is no longer busy.
+    while (access_bus_address(CM_GP0CTL_BUS) & (1 << 7))
+    {
+        // Busy-wait loop to ensure clock disable is complete.
+    }
+}
 
 /**
  * @brief Enables TX by configuring GPIO4 and setting the clock source.
@@ -1199,7 +1253,7 @@ void WsprTransmitter::transmit_symbol(
     if (debug)
         std::cout << "DEBUG: <instructions_[bufPtr] begin=0x"
                   << std::hex
-                  << reinterpret_cast<std::uintptr_t>(&instructions_[bufPtr])
+                  << reinterpret_cast<unsigned long>(&instructions_[bufPtr])
                   << std::dec << ">\n";
 
     // Transmit
@@ -1213,36 +1267,25 @@ void WsprTransmitter::transmit_symbol(
 
             // Point DMA to waveform
             bufPtr = (bufPtr + 1) & 0x3FF;
-            // Block until either DMA CONBLK_AD changes *or* someone called stopTransmission()
+            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
+                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                const long busy_addr = reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b);
-                stop_cv_.wait(lk, [&] {
-                    return stop_requested_.load()
-                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy_addr;
-                });
+                if (stop_requested_.load())
+                    return;
+                usleep(100);
             }
-            // If we were asked to stop, bail out
-            if (stop_requested_.load())
-                return;
-
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
+                reinterpret_cast<long>(const_page_.b) + f0_idx * 4;
 
             // Set transfer length
             bufPtr = (bufPtr + 1) & 0x3FF;
-            // Block efficiently until DMA pointer advances or stop requested
+            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
+                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                const long busy_addr = reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b);
-                stop_cv_.wait(lk, [&] {
-                    return stop_requested_.load()
-                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy_addr;
-                });
+                if (stop_requested_.load())
+                    return;
+                usleep(100);
             }
-            if (stop_requested_.load())
-                return;
-
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
                 n_pwmclk;
         }
@@ -1270,59 +1313,51 @@ void WsprTransmitter::transmit_symbol(
 
             // f0 SOURCE_AD
             bufPtr = (bufPtr + 1) & 0x3FF;
+            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
+                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                const long busy_addr = reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b);
-                stop_cv_.wait(lk, [&] {
-                    return stop_requested_.load()
-                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy_addr;
-                });
+                if (stop_requested_.load())
+                    return;
+                usleep(100);
             }
-            if (stop_requested_.load())
-                return;
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
+                reinterpret_cast<long>(const_page_.b) + f0_idx * 4;
 
             // f0 TXFR_LEN
             bufPtr = (bufPtr + 1) & 0x3FF;
+            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
+                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                long busy = reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b);
-                // wake when either stop_requested_ is true, or the DMA pointer has advanced
-                stop_cv_.wait(lk, [&] {
-                    return stop_requested_.load()
-                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy;
-                });
+                if (stop_requested_.load())
+                    return;
+                usleep(100);
             }
-            if (stop_requested_.load()) return;
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f0;
+            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+                n_f0;
 
             // f1 SOURCE_AD
             bufPtr = (bufPtr + 1) & 0x3FF;
+            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
+                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                long busy = reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b);
-                stop_cv_.wait(lk, [&] {
-                    return stop_requested_.load()
-                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy;
-                });
+                if (stop_requested_.load())
+                    return;
+                usleep(100);
             }
-            if (stop_requested_.load()) return;
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f1_idx * 4;
+                reinterpret_cast<long>(const_page_.b) + f1_idx * 4;
 
             // f1 TXFR_LEN
             bufPtr = (bufPtr + 1) & 0x3FF;
+            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
+                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                long busy = reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b);
-                stop_cv_.wait(lk, [&] {
-                    return stop_requested_.load()
-                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy;
-                });
+                if (stop_requested_.load())
+                    return;
+                usleep(100);
             }
-            if (stop_requested_.load()) return;
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f1;
+            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+                n_f1;
 
             // Update counters
             n_pwmclk_transmitted += n_pwmclk;
@@ -1334,9 +1369,9 @@ void WsprTransmitter::transmit_symbol(
     if (debug)
         std::cout << "DEBUG: <instructions_[bufPtr]=0x"
                   << std::hex
-                  << reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].v)
+                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].v)
                   << " 0x"
-                  << reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b)
+                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].b)
                   << std::dec << ">\n";
 }
 
@@ -1493,20 +1528,20 @@ void WsprTransmitter::create_dma_pages(
 
     // Configure the PWM clock (disable, set divisor, enable)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000026; // Source = PLLD, disable
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    usleep(1000);
     access_bus_address(CLK_BUS_BASE + 41 * 4) = 0x5A002000; // Set PWM divider to 2 (250MHz)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000016; // Source = PLLD, enable
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    usleep(1000);
 
     // Configure PWM registers
     access_bus_address(PWM_BUS_BASE + 0x0) = 0; // Disable PWM
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    usleep(1000);
     access_bus_address(PWM_BUS_BASE + 0x4) = -1; // Clear status errors
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    usleep(1000);
     access_bus_address(PWM_BUS_BASE + 0x10) = 32; // Set default range
     access_bus_address(PWM_BUS_BASE + 0x20) = 32;
     access_bus_address(PWM_BUS_BASE + 0x0) = -1; // Enable FIFO mode, repeat, serializer, and channel
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    usleep(1000);
     access_bus_address(PWM_BUS_BASE + 0x8) = (1 << 31) | 0x0707; // Enable DMA
 
     // Obtain the base address as an integer pointer
@@ -1544,46 +1579,35 @@ void WsprTransmitter::create_dma_pages(
  * @throws std::runtime_error if peripheral memory mapping fails.
  * @throws std::runtime_error if mailbox opening fails.
  */
-void WsprTransmitter::setup_dma()
-{
-    // Determine PLLD & mail-flag
-    get_plld_and_memflag();
-
-    // Map peripherals via /dev/mem (RAII)
-    int mem_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
-    if (mem_fd < 0)
-        throw std::runtime_error("Cannot open /dev/mem");
-
-    // Discover the base and map it via RAII
-    off_t peripheral_base = discover_peripheral_base();
-    constexpr size_t MAP_SIZE = 0x01000000;
-    MMapRegion region(mem_fd, peripheral_base, MAP_SIZE);
-    ::close(mem_fd);
-
-    dma_config_.peripheral_base_virtual = region.get();
-    dma_config_.peripheral_map_size = MAP_SIZE;
-    region.release(); // hand ownership off to dma_config_
-
-    // Snapshot registers for later restore
-    dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
-    dma_config_.orig_gp0div = access_bus_address(CM_GP0DIV_BUS);
-    dma_config_.orig_pwm_ctl = access_bus_address(PWM_BUS_BASE + 0x00);
-    dma_config_.orig_pwm_sta = access_bus_address(PWM_BUS_BASE + 0x04);
-    dma_config_.orig_pwm_rng1 = access_bus_address(PWM_BUS_BASE + 0x10);
-    dma_config_.orig_pwm_rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
-    dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
-
-    // Open mailbox (RAII)
-    MailboxHandle mbox;
-    mailbox_.handle = mbox.get();
-    mbox.release(); // now wsprTransmitter owns it
-
-    // Build your DMA pages as before
-    create_dma_pages(const_page_, instr_page_, instructions_);
-
-    // <ark everything ready
-    dma_setup_done_ = true;
-}
+ void WsprTransmitter::setup_dma()
+ {
+     // 1) Retrieve PLLD frequency and mailbox flag
+     get_plld_and_memflag();
+ 
+     // 2) Map peripherals via /dev/mem
+     setup_peripheral_base_virtual();
+     // (that method should set dma_config_.peripheral_base_virtual for you)
+ 
+     // 3) Snapshot registers for cleanup
+     dma_config_.orig_gp0ctl     = access_bus_address(CM_GP0CTL_BUS);
+     dma_config_.orig_gp0div     = access_bus_address(CM_GP0DIV_BUS);
+     dma_config_.orig_pwm_ctl    = access_bus_address(PWM_BUS_BASE + 0x00);
+     dma_config_.orig_pwm_sta    = access_bus_address(PWM_BUS_BASE + 0x04);
+     dma_config_.orig_pwm_rng1   = access_bus_address(PWM_BUS_BASE + 0x10);
+     dma_config_.orig_pwm_rng2   = access_bus_address(PWM_BUS_BASE + 0x20);
+     dma_config_.orig_pwm_fifocfg= access_bus_address(PWM_BUS_BASE + 0x08);
+ 
+     // 4) Open the mailbox
+     mailbox_.handle = mbox_open();
+     if (mailbox_.handle < 0)
+         throw std::runtime_error("setup_dma: mbox_open failed");
+ 
+     // 5) Allocate and build DMA pages
+     create_dma_pages(const_page_, instr_page_, instructions_);
+ 
+     // 6) Mark ready
+     dma_setup_done_ = true;
+ }
 
 /**
  * @brief Configures the DMA frequency table for signal generation.
