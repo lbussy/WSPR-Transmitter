@@ -1570,44 +1570,42 @@ void WsprTransmitter::create_dma_pages(
  */
 void WsprTransmitter::setup_dma()
 {
-    // 1) PLLD & mailbox flag
+    // 1) Figure out PLLD & mailbox flags
     get_plld_and_memflag();
 
-    // 2) open /dev/mem for mapping
-    int mem_fd = ::open("/dev/mem", O_RDWR|O_SYNC);
+    // 2) Map peripherals  
+    //    - open /dev/mem  
+    //    - use MMapRegion so it auto-unmaps if anything throws
+    int mem_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
     if (mem_fd < 0)
-        throw std::runtime_error(std::string("setup_dma: open(/dev/mem) failed: ")
-                                + std::strerror(errno));
+        throw std::runtime_error("setup_dma: open(/dev/mem) failed: " + std::string(std::strerror(errno)));
+    MMapRegion region(mem_fd, discover_peripheral_base(), 0x01000000);
+    ::close(mem_fd);
 
-    // 3) RAII-map the peripheral block
-    constexpr size_t MAP_SIZE = 0x01000000;
-    MMapRegion region(mem_fd, discover_peripheral_base(), MAP_SIZE);
-    ::close(mem_fd);  // safe to close the fd once mapped
-
-    // 4) RAII-open the mailbox
-    MailboxHandle mbox;
-
-    // 5) everything so far succeeded → snapshot registers
+    // 3) Hand ownership of the mapping into dma_config_
     dma_config_.peripheral_base_virtual = region.get();
-    dma_config_.orig_gp0ctl      = access_bus_address(CM_GP0CTL_BUS);
-    dma_config_.orig_gp0div      = access_bus_address(CM_GP0DIV_BUS);
-    dma_config_.orig_pwm_ctl     = access_bus_address(PWM_BUS_BASE + 0x00);
-    dma_config_.orig_pwm_sta     = access_bus_address(PWM_BUS_BASE + 0x04);
-    dma_config_.orig_pwm_rng1    = access_bus_address(PWM_BUS_BASE + 0x10);
-    dma_config_.orig_pwm_rng2    = access_bus_address(PWM_BUS_BASE + 0x20);
-    dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
+    region.release();  // so ~MMapRegion() won't unmap now
 
-    // 6) commit the mailbox handle
+    // 4) Snapshot the registers we’ll need to restore later
+    dma_config_.orig_gp0ctl     = access_bus_address(CM_GP0CTL_BUS);
+    dma_config_.orig_gp0div     = access_bus_address(CM_GP0DIV_BUS);
+    dma_config_.orig_pwm_ctl    = access_bus_address(PWM_BUS_BASE + 0x00);
+    dma_config_.orig_pwm_sta    = access_bus_address(PWM_BUS_BASE + 0x04);
+    dma_config_.orig_pwm_rng1   = access_bus_address(PWM_BUS_BASE + 0x10);
+    dma_config_.orig_pwm_rng2   = access_bus_address(PWM_BUS_BASE + 0x20);
+    dma_config_.orig_pwm_fifocfg= access_bus_address(PWM_BUS_BASE + 0x08);
+
+    // 5) Open the mailbox  
+    //    - MailboxHandle will close on destruction if we throw
+    MailboxHandle mbox;
     mailbox_.handle = mbox.get();
+    mbox.release();  // now WsprTransmitter owns it
 
-    // 7) build your DMA pages (this may still throw)
+    // 6) Build all your DMA pages  
+    //    If this throws, both the mapping and the mailbox will be cleaned up automatically.
     create_dma_pages(const_page_, instr_page_, instructions_);
 
-    // 8) release RAII ownership so we keep the raw values alive
-    region.release();
-    mbox.release();
-
-    // 9) mark setup complete
+    // 7) Mark that everything’s up
     dma_setup_done_ = true;
 }
 
