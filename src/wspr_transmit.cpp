@@ -1060,31 +1060,27 @@ void WsprTransmitter::deallocate_memory_pool()
  * @details Clears the enable bit in the clock control register and waits
  *          until the clock is no longer busy. Ensures proper synchronization.
  */
-void WsprTransmitter::disable_clock()
-{
-    // Set semaphore
-    transmit_on_.store(false);
+ void WsprTransmitter::disable_clock()
+ {
+     // Clear the “transmitting” flag
+     transmit_on_.store(false, std::memory_order_release);
 
-    // Ensure memory-mapped peripherals are initialized before proceeding.
-    if (dma_config_.peripheral_base_virtual == nullptr)
-    {
-        return;
-    }
+     // If we never mapped peripherals, nothing to do
+     if (!dma_config_.peripheral_base_virtual)
+         return;
 
-    // Read current clock settings from the clock control register.
-    auto settings = access_bus_address(CM_GP0CTL_BUS);
+     // Read, modify, and write back the clock‐control register to disable
+     auto ctl = access_bus_address(CM_GP0CTL_BUS);
+     ctl = (ctl & 0x7EF) | 0x5A000000;  // clear ENAB bit, OR in password
+     access_bus_address(CM_GP0CTL_BUS) = static_cast<int>(ctl);
 
-    // Disable the clock: clear the enable bit while preserving other settings.
-    // Apply the required password (0x5A000000) to modify the register.
-    settings = (settings & 0x7EF) | 0x5A000000;
-    access_bus_address(CM_GP0CTL_BUS) = static_cast<int>(settings);
-
-    // Wait until the clock is no longer busy.
-    while (access_bus_address(CM_GP0CTL_BUS) & (1 << 7))
-    {
-        // Busy-wait loop to ensure clock disable is complete.
-    }
-}
+     // Wait until the hardware “busy” bit (bit 7) clears
+     while (access_bus_address(CM_GP0CTL_BUS) & (1 << 7))
+     {
+         // gently yield to other threads, or sleep a tiny bit
+         std::this_thread::yield();
+     }
+ }
 
 /**
  * @brief Enables TX by configuring GPIO4 and setting the clock source.
