@@ -94,6 +94,12 @@ public:
      */
     ~WsprTransmitter();
 
+    // non‐copyable, non‐movable
+    WsprTransmitter(WsprTransmitter const &) = delete;
+    WsprTransmitter &operator=(WsprTransmitter const &) = delete;
+    WsprTransmitter(WsprTransmitter &&) = delete;
+    WsprTransmitter &operator=(WsprTransmitter &&) = delete;
+
     /**
      * @details Defines the function prototype for user‑provided callbacks that
      *          are called when a WSPR transmission completes. The callback
@@ -1218,8 +1224,15 @@ private:
                                { return stop_requested_.load(std::memory_order_acquire); });
                 if (stop_requested_.load(std::memory_order_acquire))
                     break;
-                // fire!
+
                 parent_->stop_requested_.store(false, std::memory_order_release);
+
+                // If a previous TX is still running, wait for it to finish
+                if (parent_->tx_thread_.joinable())
+                {
+                    parent_->tx_thread_.join();
+                }
+                // Transmit
                 parent_->tx_thread_ = std::thread(&WsprTransmitter::thread_entry, parent_);
             }
         }

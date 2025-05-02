@@ -90,7 +90,9 @@ WsprTransmitter::WsprTransmitter() = default;
  */
 WsprTransmitter::~WsprTransmitter()
 {
-    shutdownTransmitter();
+    // Stop scheduling new windows and any current TX
+    disableTransmission(); // Stops scheduler + joins any tx_thread_
+    dma_cleanup();         // In case anything still mapped
 }
 
 /**
