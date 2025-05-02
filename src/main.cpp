@@ -1,25 +1,21 @@
-// Project Headers
+// Project headers
 #include "config_handler.hpp"
 #include "utils.hpp"
 #include "wspr_transmit.hpp"
 
-// Submodule Headers
+// C++ Standard Library
+#include <array>               // std::array for signal list
+#include <condition_variable>  // g_end_cv
+#include <csignal>             // sigaction, std::signal
+#include <cstring>             // strsignal()
+#include <cstdio>              // getchar()
+#include <iostream>            // std::cout, std::getline
+#include <mutex>               // g_end_mtx
+#include <string>              // std::string
 
-// Standard C++ Headers
-#include <atomic>
-#include <array>
-#include <chrono>
-#include <condition_variable>
-#include <mutex>
-#include <csignal>
-#include <ctime>
-#include <iostream>
-#include <thread>
-
-#include <unistd.h>
-#include <string.h>
-#include <termios.h>
-#include <sys/select.h>
+// POSIX & System-Specific Headers
+#include <termios.h>           // tcgetattr(), tcsetattr()
+#include <unistd.h>            // STDIN_FILENO
 
 // at file scope
 static std::mutex g_end_mtx;
