@@ -36,6 +36,7 @@ extern "C"
 // C++ Standard Library Headers
 #include <algorithm> // std::copy_n, std::clamp
 #include <cassert>   // assert()
+#include <cerrno>
 #include <cmath>     // std::round, std::pow, std::floor
 #include <cstdint>   // std::uintptr_t
 #include <cstring>   // std::memcpy, std::strerror
@@ -47,6 +48,7 @@ extern "C"
 #include <random>    // std::random_device, std::mt19937, std::uniform_real_distribution
 #include <sstream>   // std::stringstream
 #include <stdexcept> // std::runtime_error
+#include <system_error>
 
 // POSIX & System-Specific Headers
 #include <fcntl.h>    // open flags
@@ -61,7 +63,82 @@ constexpr const bool debug = true;
 constexpr const bool debug = false;
 #endif
 
-/* Public Methods */
+// Helper Class/Struct
+namespace
+{
+    // RAII for mmap’d peripheral region
+    class MMapRegion
+    {
+        void *ptr_;
+        size_t size_;
+
+    public:
+        MMapRegion(int mem_fd, off_t offset, size_t size)
+            : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, offset)), size_(size)
+        {
+            if (ptr_ == MAP_FAILED)
+                throw std::system_error(errno, std::generic_category(),
+                                        "WsprTransmitter::setup_dma mmap");
+        }
+        ~MMapRegion()
+        {
+            if (ptr_)
+                munmap(ptr_, size_);
+        }
+
+        MMapRegion(const MMapRegion &) = delete;
+        MMapRegion &operator=(const MMapRegion &) = delete;
+
+        void *get() const { return ptr_; }
+        void release() { ptr_ = nullptr; } // take ownership away
+    };
+
+    // RAII for mailbox handle
+    class MailboxHandle
+    {
+        int fd_;
+
+    public:
+        MailboxHandle() : fd_(mbox_open())
+        {
+            if (fd_ < 0)
+                throw std::runtime_error("mbox_open failed");
+        }
+        ~MailboxHandle()
+        {
+            if (fd_ >= 0)
+                mbox_close(fd_);
+        }
+        int get() const { return fd_; }
+        void release() { fd_ = -1; }
+    };
+
+    // Read 4 bytes from device-tree and interpret big-endian
+    static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
+    {
+        std::ifstream f(file, std::ios::binary);
+        if (!f)
+            return std::nullopt;
+        f.seekg(off);
+        uint8_t buf[4];
+        if (f.read(reinterpret_cast<char *>(buf), 4))
+            return (uint32_t(buf[0]) << 24) | (uint32_t(buf[1]) << 16) | (uint32_t(buf[2]) << 8) | uint32_t(buf[3]);
+        return std::nullopt;
+    }
+
+    // the helper you actually call below:
+    static off_t discover_peripheral_base()
+    {
+        // default fallback
+        uint32_t base = 0x20000000;
+        if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0)
+            base = *v;
+        else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v)
+            base = *v;
+        return static_cast<off_t>(base);
+    }
+
+} // anonymous
 
 /**
  * @brief Global instance of the WSPR transmitter.
@@ -71,6 +148,8 @@ constexpr const bool debug = false;
  * program startup and destructed automatically on exit.
  */
 WsprTransmitter wsprTransmitter;
+
+/* Public Methods */
 
 /**
  * @brief Constructs a WSPR transmitter with default settings.
@@ -580,8 +659,10 @@ void WsprTransmitter::dma_cleanup()
     // Unmap peripheral region if mapped
     if (dma_config_.peripheral_base_virtual)
     {
-        munmap(dma_config_.peripheral_base_virtual, 0x01000000);
+        munmap(dma_config_.peripheral_base_virtual,
+               dma_config_.peripheral_map_size);
         dma_config_.peripheral_base_virtual = nullptr;
+        dma_config_.peripheral_map_size = 0;
     }
 
     // Deallocate mailbox-allocated memory pages
@@ -847,77 +928,6 @@ void WsprTransmitter::get_plld_and_memflag()
         std::cerr << "Error: Invalid PLLD frequency; defaulting to 500 MHz\n";
         dma_config_.plld_nominal_freq = 500e6;
         dma_config_.plld_clock_frequency = 500e6;
-    }
-}
-
-/**
- * @brief Maps peripheral base address to virtual memory.
- *
- * Reads the Raspberry Pi's device tree to determine the peripheral base
- * address, then memory-maps that region for access via virtual memory.
- *
- * This is used for low-level register access to GPIO, clocks, DMA, etc.
- *
- * @param[out] dma_config_.peripheral_base_virtual Reference to a pointer that will
- *             be set to the mapped virtual memory address.
- *
- * @throws Terminates the program if the peripheral base cannot be determined,
- *         `/dev/mem` cannot be opened, or `mmap` fails.
- */
-void WsprTransmitter::setup_peripheral_base_virtual()
-{
-    auto read_dt_range = [](const std::string &filename, unsigned offset) -> std::optional<unsigned>
-    {
-        std::ifstream file(filename, std::ios::binary);
-        if (!file)
-            return std::nullopt;
-
-        file.seekg(offset);
-        if (!file.good())
-            return std::nullopt;
-
-        unsigned char buf[4] = {};
-        file.read(reinterpret_cast<char *>(buf), sizeof(buf));
-        if (file.gcount() != sizeof(buf))
-            return std::nullopt;
-
-        // Big‑endian to host‑endian conversion
-        return (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
-    };
-
-    unsigned peripheral_base = 0x20000000; // Default fallback
-    if (auto addr = read_dt_range("/proc/device-tree/soc/ranges", 4); addr && *addr != 0)
-    {
-        peripheral_base = *addr;
-    }
-    else if (auto addr = read_dt_range("/proc/device-tree/soc/ranges", 8); addr)
-    {
-        peripheral_base = *addr;
-    }
-
-    int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (mem_fd < 0)
-    {
-        throw std::runtime_error("Error: Cannot open /dev/mem.");
-    }
-
-    // mmap returns void*, so assign directly
-    dma_config_.peripheral_base_virtual = mmap(
-        nullptr,
-        0x01000000,             // 16 MB
-        PROT_READ | PROT_WRITE, // read/write
-        MAP_SHARED,
-        mem_fd,
-        peripheral_base);
-    close(mem_fd);
-
-    if (!dma_config_.peripheral_base_virtual)
-        throw std::runtime_error("peripheral_base_virtual not initialized");
-
-    // Check against MAP_FAILED, not –1
-    if (dma_config_.peripheral_base_virtual == MAP_FAILED)
-    {
-        throw std::runtime_error("Error: peripheral_base_virtual mmap failed.");
     }
 }
 
@@ -1501,13 +1511,25 @@ void WsprTransmitter::create_dma_pages(
  */
 void WsprTransmitter::setup_dma()
 {
-    // Retrieve PLLD frequency and DMA memory flag
+    // Determine PLLD & mail-flag
     get_plld_and_memflag();
 
-    // Map the peripheral base address into virtual memory
-    setup_peripheral_base_virtual();
+    // Map peripherals via /dev/mem (RAII)
+    int mem_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
+    if (mem_fd < 0)
+        throw std::runtime_error("Cannot open /dev/mem");
 
-    // Save original register states for cleanup
+    // Discover the base and map it via RAII
+    off_t peripheral_base = discover_peripheral_base();
+    constexpr size_t MAP_SIZE = 0x01000000;
+    MMapRegion region(mem_fd, peripheral_base, MAP_SIZE);
+    ::close(mem_fd);
+
+    dma_config_.peripheral_base_virtual = region.get();
+    dma_config_.peripheral_map_size = MAP_SIZE;
+    region.release(); // hand ownership off to dma_config_
+
+    // Snapshot registers for later restore
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
     dma_config_.orig_gp0div = access_bus_address(CM_GP0DIV_BUS);
     dma_config_.orig_pwm_ctl = access_bus_address(PWM_BUS_BASE + 0x00);
@@ -1516,13 +1538,15 @@ void WsprTransmitter::setup_dma()
     dma_config_.orig_pwm_rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
     dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
 
-    // Open the mailbox for DMA memory allocation
-    open_mbox();
+    // Open mailbox (RAII)
+    MailboxHandle mbox;
+    mailbox_.handle = mbox.get();
+    mbox.release(); // now wsprTransmitter owns it
 
-    // Allocate memory pages and build DMA control blocks
+    // Build your DMA pages as before
     create_dma_pages(const_page_, instr_page_, instructions_);
 
-    // Flag setup as done
+    // <ark everything ready
     dma_setup_done_ = true;
 }
 

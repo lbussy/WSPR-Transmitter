@@ -621,6 +621,7 @@ private:
         double plld_clock_frequency;   ///< PLLD clock frequency in Hz after PPM correction.
         int mem_flag;                  ///< Mailbox memory allocation flags for DMA.
         void *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
+        size_t peripheral_map_size;
         uint32_t orig_gp0ctl;          ///< Saved GP0CTL register (clock control).
         uint32_t orig_gp0div;          ///< Saved GP0DIV register (clock divider).
         uint32_t orig_pwm_ctl;         ///< Saved PWM control register.
@@ -643,6 +644,7 @@ private:
               plld_clock_frequency(plld_nominal_freq),
               mem_flag(0x0c),
               peripheral_base_virtual(nullptr),
+              peripheral_map_size{0},
               orig_gp0ctl(0),
               orig_gp0div(0),
               orig_pwm_ctl(0),
@@ -938,22 +940,6 @@ private:
      * @throws std::runtime_error if the processor ID is unrecognized.
      */
     void get_plld_and_memflag();
-
-    /**
-     * @brief Maps peripheral base address to virtual memory.
-     *
-     * Reads the Raspberry Pi's device tree to determine the peripheral base
-     * address, then memory-maps that region for access via virtual memory.
-     *
-     * This is used for low-level register access to GPIO, clocks, DMA, etc.
-     *
-     * @param[out] dma_config_.peripheral_base_virtual Reference to a pointer that will
-     *             be set to the mapped virtual memory address.
-     *
-     * @throws Terminates the program if the peripheral base cannot be determined,
-     *         `/dev/mem` cannot be opened, or `mmap` fails.
-     */
-    void setup_peripheral_base_virtual();
 
     /**
      * @brief Allocate a pool of DMA‑capable memory pages.
