@@ -55,7 +55,7 @@ extern "C"
 #include <sys/mman.h> // mmap, munmap, MAP_SHARED, PROT_READ/WRITE
 #include <sys/stat.h> // struct stat, stat()
 #include <sys/time.h> // gettimeofday(), struct timeval
-#include <unistd.h>   // usleep(), close(), unlink()
+#include <unistd.h>   // close(), unlink()
 
 #ifdef DEBUG_WSPR_TRANSMIT
 constexpr const bool debug = true;
@@ -1197,25 +1197,36 @@ void WsprTransmitter::transmit_symbol(
 
             // Point DMA to waveform
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
+            // Block until either DMA CONBLK_AD changes *or* someone called stopTransmission()
             {
-                if (stop_requested_.load())
-                    return;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                const long busy_addr = reinterpret_cast<long>(instructions_[bufPtr].b);
+                stop_cv_.wait(lk, [&] {
+                    return stop_requested_.load()
+                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy_addr;
+                });
             }
+            // If we were asked to stop, bail out
+            if (stop_requested_.load())
+                return;
+
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
                 reinterpret_cast<long>(const_page_.b) + f0_idx * 4;
 
             // Set transfer length
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
+            // Block efficiently until DMA pointer advances or stop requested
             {
-                if (stop_requested_.load())
-                    return;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                const long busy_addr = reinterpret_cast<long>(instructions_[bufPtr].b);
+                stop_cv_.wait(lk, [&] {
+                    return stop_requested_.load()
+                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy_addr;
+                });
             }
+            if (stop_requested_.load())
+                return;
+
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
                 n_pwmclk;
         }
@@ -1243,51 +1254,59 @@ void WsprTransmitter::transmit_symbol(
 
             // f0 SOURCE_AD
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
-                    return;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                const long busy_addr = reinterpret_cast<long>(instructions_[bufPtr].b);
+                stop_cv_.wait(lk, [&] {
+                    return stop_requested_.load()
+                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy_addr;
+                });
             }
+            if (stop_requested_.load())
+                return;
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
                 reinterpret_cast<long>(const_page_.b) + f0_idx * 4;
 
             // f0 TXFR_LEN
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
-                    return;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                long busy = reinterpret_cast<long>(instructions_[bufPtr].b);
+                // wake when either stop_requested_ is true, or the DMA pointer has advanced
+                stop_cv_.wait(lk, [&] {
+                    return stop_requested_.load()
+                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy;
+                });
             }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
-                n_f0;
+            if (stop_requested_.load()) return;
+            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f0;
 
             // f1 SOURCE_AD
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
-                    return;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                long busy = reinterpret_cast<long>(instructions_[bufPtr].b);
+                stop_cv_.wait(lk, [&] {
+                    return stop_requested_.load()
+                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy;
+                });
             }
+            if (stop_requested_.load()) return;
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
                 reinterpret_cast<long>(const_page_.b) + f1_idx * 4;
 
             // f1 TXFR_LEN
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
-                    return;
-                usleep(100);
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                long busy = reinterpret_cast<long>(instructions_[bufPtr].b);
+                stop_cv_.wait(lk, [&] {
+                    return stop_requested_.load()
+                        || access_bus_address(DMA_BUS_BASE + 0x04) != busy;
+                });
             }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
-                n_f1;
+            if (stop_requested_.load()) return;
+            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f1;
 
             // Update counters
             n_pwmclk_transmitted += n_pwmclk;
@@ -1458,20 +1477,20 @@ void WsprTransmitter::create_dma_pages(
 
     // Configure the PWM clock (disable, set divisor, enable)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000026; // Source = PLLD, disable
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(CLK_BUS_BASE + 41 * 4) = 0x5A002000; // Set PWM divider to 2 (250MHz)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000016; // Source = PLLD, enable
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     // Configure PWM registers
     access_bus_address(PWM_BUS_BASE + 0x0) = 0; // Disable PWM
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(PWM_BUS_BASE + 0x4) = -1; // Clear status errors
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(PWM_BUS_BASE + 0x10) = 32; // Set default range
     access_bus_address(PWM_BUS_BASE + 0x20) = 32;
     access_bus_address(PWM_BUS_BASE + 0x0) = -1; // Enable FIFO mode, repeat, serializer, and channel
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(PWM_BUS_BASE + 0x8) = (1 << 31) | 0x0707; // Enable DMA
 
     // Obtain the base address as an integer pointer
