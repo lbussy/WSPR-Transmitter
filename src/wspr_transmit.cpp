@@ -352,18 +352,35 @@ void WsprTransmitter::setThreadScheduling(int policy, int priority)
 }
 
 /**
- * @brief Start the background scheduler that will fire at the next
- *        WSPR window and launch the transmit thread.
+ * @brief Start transmission, either immediately or via the scheduler.
  *
- * @note This is non‐blocking: returns immediately, scheduler runs in
- *       its own thread.
+ * @details
+ *   If `trans_params_.is_tone == true`, this will spawn the transmit
+ *   thread right away (bypassing the scheduler). Otherwise it launches
+ *   the background scheduler, which will fire at the next WSPR window
+ *   and then spawn the transmit thread.
+ *
+ * @note This call is non-blocking. In tone mode it returns immediately
+ *       after spawning the thread; in WSPR mode it returns immediately
+ *       after starting the scheduler thread.
  */
-void WsprTransmitter::enableTransmission()
-{
-    // Any in-flight tx should be clear
-    stop_requested_.store(false, std::memory_order_release);
-    scheduler_.start();
-}
+ void WsprTransmitter::enableTransmission()
+ {
+     stop_requested_.store(false, std::memory_order_release);
+ 
+     if (trans_params_.is_tone)
+     {
+         // Tone mode: start right away
+         if (tx_thread_.joinable())
+             tx_thread_.join();
+         tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
+     }
+     else
+     {
+         // Scheduled WSPR mode
+         scheduler_.start();
+     }
+ }
 
 /**
  * @brief Cancels the scheduler (and any running transmission).

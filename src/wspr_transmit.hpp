@@ -177,11 +177,17 @@ public:
     void setThreadScheduling(int policy, int priority);
 
     /**
-     * @brief Start the background scheduler that will fire at the next
-     *        WSPR window and launch the transmit thread.
+     * @brief Start transmission, either immediately or via the scheduler.
      *
-     * @note This is non‐blocking: returns immediately, scheduler runs in
-     *       its own thread.
+     * @details
+     *   If `trans_params_.is_tone == true`, this will spawn the transmit
+     *   thread right away (bypassing the scheduler). Otherwise it launches
+     *   the background scheduler, which will fire at the next WSPR window
+     *   and then spawn the transmit thread.
+     *
+     * @note This call is non-blocking. In tone mode it returns immediately
+     *       after spawning the thread; in WSPR mode it returns immediately
+     *       after starting the scheduler thread.
      */
     void enableTransmission();
 
@@ -1009,7 +1015,8 @@ private:
     void transmit_symbol(
         const int &sym_num,
         const double &tsym,
-        int &bufPtr);
+        int &bufPtr
+    );
 
     /**
      * @brief Disables and resets the DMA engine.
@@ -1058,7 +1065,8 @@ private:
     void create_dma_pages(
         struct PageInfo &const_page_,
         struct PageInfo &instr_page_,
-        struct PageInfo instructions_[]);
+        struct PageInfo instructions_[]
+    );
 
     /**
      * @brief Configure and initialize the DMA system for WSPR transmission.
