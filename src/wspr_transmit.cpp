@@ -63,141 +63,207 @@ constexpr const bool debug = true;
 constexpr const bool debug = false;
 #endif
 
-/**
- * @file wspr_transmit.cpp - anonymous namespace
- * @brief Helpers for peripheral base discovery, mmap and mailbox RAII.
- */
+// Helper classes and functions in anonymous namespace
 namespace
 {
+
     /**
-    * @brief Read a 4-byte big-endian integer from a device-tree file.
-    *
-    * Attempts to open the given file in binary mode, seek to the specified
-    * offset, and read 4 bytes. Returns std::nullopt on any I/O error.
-    *
-    * @param file The path to the device-tree property file.
-    * @param off  Byte offset within the file to read from.
-    * @return std::optional<uint32_t> The 32-bit big-endian value, or nullopt.
-    */
+     * @brief Read a 4-byte big-endian integer from a device-tree file.
+     *
+     * Attempts to open `file` in binary mode, seek to `off`, and read exactly 4 bytes.
+     * Returns std::nullopt on any I/O error.
+     *
+     * @param file Path to the device-tree property file.
+     * @param off  Byte offset within the file to begin reading.
+     * @return std::optional<uint32_t> The parsed 32-bit big-endian value, or nullopt.
+     */
     static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
     {
         std::ifstream f(file, std::ios::binary);
-        if (!f)
-            return std::nullopt;
+        if (!f) return std::nullopt;
         f.seekg(off);
         uint8_t buf[4];
         if (f.read(reinterpret_cast<char*>(buf), sizeof(buf))) {
             return (uint32_t(buf[0]) << 24)
-                | (uint32_t(buf[1]) << 16)
-                | (uint32_t(buf[2]) <<  8)
-                |  uint32_t(buf[3]);
+                 | (uint32_t(buf[1]) << 16)
+                 | (uint32_t(buf[2]) <<  8)
+                 |  uint32_t(buf[3]);
         }
         return std::nullopt;
     }
-
+    
+    // We hard-code 4 KB page/block sizes here because the class’s PAGE_SIZE/BLOCK_SIZE are private.
+    static constexpr size_t kPageSize  = 4 * 1024;
+    static constexpr size_t kBlockSize = 4 * 1024;
+    
     /**
-    * @brief RAII wrapper for a memory-mapped I/O region.
-    *
-    * Maps a physical address range via /dev/mem on construction and
-    * unmaps it on destruction (unless released). Throws on mmap failure.
-    */
+     * @brief RAII wrapper for a memory-mapped I/O region.
+     *
+     * Maps a physical address range via `/dev/mem` on construction and unmaps it
+     * on destruction (unless released). Throws on mmap failure.
+     *
+     * @note Use `release()` if you hand ownership of the mapping elsewhere.
+     */
     class MMapRegion
     {
         void*  ptr_;
         size_t size_;
-
     public:
         /**
-        * @param fd     File descriptor for /dev/mem (must be open).
-        * @param offset Physical base address to map.
-        * @param size   Length of the region in bytes.
-        * @throws std::runtime_error on mmap failure.
-        */
+         * @param fd     File descriptor for `/dev/mem` (must already be open).
+         * @param offset Physical address offset to map.
+         * @param size   Length of the region, in bytes.
+         * @throws std::runtime_error if `mmap` fails.
+         */
         MMapRegion(int fd, off_t offset, size_t size)
-            : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset)),
+          : ptr_(mmap(nullptr, size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, offset)),
             size_(size)
         {
-            if (ptr_ == MAP_FAILED) {
-                throw std::runtime_error("MMapRegion: mmap failed: " + std::string(strerror(errno)));
+            if (ptr_ == MAP_FAILED)
+            {
+                throw std::runtime_error("MMapRegion: mmap failed: " + std::string(std::strerror(errno)));
             }
         }
-
+    
         /** Unmap the region unless it has been released. */
         ~MMapRegion()
         {
-            if (ptr_) {
-                munmap(ptr_, size_);
-            }
+            if (ptr_) munmap(ptr_, size_);
         }
-
+    
         /** @return The mapped pointer. */
-        void* get() const { return ptr_; }
-
+        void* get() const     { return ptr_; }
         /**
-        * @brief Release ownership so the destructor won't unmap.
-        *
-        * Call after transferring ptr_ to another owner (e.g., storing
-        * in dma_config_), otherwise the region is unmapped.
-        */
-        void release() { ptr_ = nullptr; }
+         * @brief Release ownership so the destructor won’t unmap.
+         *
+         * Call after moving `ptr_` into another owner (e.g. storing
+         * in `dma_config_.peripheral_base_virtual`).
+         */
+        void  release()       { ptr_ = nullptr; }
     };
-
+    
     /**
-    * @brief RAII wrapper for Broadcom mailbox handle.
-    *
-    * Opens the mailbox in the ctor and closes it in the dtor. Throws
-    * if mbox_open() fails.
-    */
+     * @brief RAII wrapper for a Broadcom mailbox handle.
+     *
+     * Opens the mailbox in the constructor and closes it in the destructor.
+     * Throws if `mbox_open()` fails.
+     */
     class MailboxHandle
     {
         int fd_;
-
     public:
-        MailboxHandle()
-            : fd_(mbox_open())
+        /** @throws std::runtime_error if `mbox_open()` returns < 0. */
+        MailboxHandle() : fd_(mbox_open()) 
         {
-            if (fd_ < 0) {
-                throw std::runtime_error("MailboxHandle: mbox_open failed");
-            }
+            if (fd_ < 0) throw std::runtime_error("MailboxHandle: mbox_open failed");
         }
 
         ~MailboxHandle()
         {
-            if (fd_ >= 0) {
-                mbox_close(fd_);
-            }
+            if (fd_ >= 0) mbox_close(fd_);
         }
 
         /** @return The mailbox file descriptor. */
-        int get() const { return fd_; }
+        int  get()     const { return fd_; }
 
         /**
-        * @brief Release ownership so the destructor won't close.
-        *
-        * Use after transferring fd_ to mailbox_.handle.
-        */
-        void release() { fd_ = -1; }
+         * @brief Release ownership so the destructor won’t close.
+         *
+         * Use after transferring `fd_` to `mailbox_.handle`.
+         */
+        void release()       { fd_ = -1; }
     };
-
+    
     /**
-    * @brief Determine the peripheral base address from the device tree.
-    *
-    * Reads the "ranges" property of the device tree at offsets 4 and 8 to
-    * discover the SOC peripheral base. Falls back to 0x2000_0000 if unavailable.
-    *
-    * @return The bus address to pass as the mmap offset.
-    */
+     * @brief Determine the SOC peripheral base address from the device tree.
+     *
+     * Reads the 4-byte values at offsets 4 and 8 of
+     * `/proc/device-tree/soc/ranges` to discover the peripheral base.
+     * Falls back to 0x2000 0000 if neither is available.
+     *
+     * @return The bus address to pass as the offset for `mmap()`.
+     */
     static off_t discover_peripheral_base()
     {
         uint32_t base = 0x20000000;
-        if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0) {
+        if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0)
+        {
             base = *v;
-        } else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v) {
+        }
+        else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v)
+        {
             base = *v;
         }
         return static_cast<off_t>(base);
     }
-} // anonymous namespace 
+    
+    /**
+     * @brief RAII for a pool of DMA-capable pages allocated via mailbox.
+     *
+     * On construction:
+     *   1. Calls `mem_alloc()` for `numpages`.
+     *   2. Calls `mem_lock()` to get the bus address.
+     *   3. Calls `mapmem()` to map into user space.
+     *
+     * On destruction: unmaps, unlocks, and frees the pages automatically.
+     *
+     * @throws std::runtime_error on any mailbox or mapping failure.
+     */
+    class MailboxMemoryPool
+    {
+        int            mbox_fd_;
+        size_t         total_size_;
+        unsigned       mem_ref_, bus_addr_;
+        unsigned char *virt_addr_;
+    
+    public:
+        /**
+         * @param mbox_fd   Open mailbox descriptor.
+         * @param numpages  Number of pages to allocate (1 const + N instr).
+         * @param mem_flag  The mailbox allocation flag from `dma_config_.mem_flag`.
+         */
+        MailboxMemoryPool(int mbox_fd, unsigned numpages, uint32_t mem_flag)
+          : mbox_fd_(mbox_fd),
+            total_size_(numpages * kPageSize),
+            mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
+        {
+            // Allocate
+            mem_ref_  = mem_alloc(mbox_fd_, total_size_, kBlockSize, mem_flag);
+            if (!mem_ref_) throw std::runtime_error("MailboxMemoryPool: mem_alloc failed");
+            // Lock
+            bus_addr_ = mem_lock(mbox_fd_, mem_ref_);
+            if (!bus_addr_)
+            {
+                mem_free(mbox_fd_, mem_ref_);
+                throw std::runtime_error("MailboxMemoryPool: mem_lock failed");
+            }
+            // Map
+            auto phys = static_cast<off_t>(bus_addr_ & ~0xC0000000UL);
+            virt_addr_ = static_cast<unsigned char*>( mapmem(phys, total_size_) );
+            if (!virt_addr_)
+            {
+                mem_unlock(mbox_fd_, mem_ref_);
+                mem_free(mbox_fd_, mem_ref_);
+                throw std::runtime_error("MailboxMemoryPool: mapmem failed");
+            }
+        }
+    
+        /** Unmap, unlock, and free on destruction. */
+        ~MailboxMemoryPool()
+        {
+            if (virt_addr_) { unmapmem(virt_addr_, total_size_); }
+            if (bus_addr_)  { mem_unlock(mbox_fd_, mem_ref_); mem_free(mbox_fd_, mem_ref_); }
+        }
+    
+        /** @return Virtual base pointer for the DMA pages. */
+        unsigned char* virt() const { return virt_addr_; }
+        /** @return Bus address of the first DMA page. */
+        unsigned       bus()  const { return bus_addr_; }
+        /** @return Total size of the mapped region, in bytes. */
+        size_t         size() const { return total_size_; }
+    };
+    
+} // end anonymous namespace
 
 /**
  * @brief Global instance of the WSPR transmitter.
@@ -411,17 +477,29 @@ void WsprTransmitter::setThreadScheduling(int policy, int priority)
 }
 
 /**
- * @brief Start the background scheduler that will fire at the next
- *        WSPR window and launch the transmit thread.
+ * @brief Begin transmission immediately for tone mode, or schedule for the next
+ *        WSPR window.
  *
- * @note This is non‐blocking: returns immediately, scheduler runs in
- *       its own thread.
+ * @details
+ *   – If `trans_params_.is_tone == true`, this will spawn the TX thread
+ *     immediately (bypassing the scheduler) so you can start/stop your
+ *     test tone on demand.
+ *   – Otherwise it launches the scheduler thread, which waits for the next
+ *     valid WSPR window and then fires off a transmission.
  */
 void WsprTransmitter::enableTransmission()
 {
-    // Any in-flight tx should be clear
     stop_requested_.store(false, std::memory_order_release);
-    scheduler_.start();
+    if (trans_params_.is_tone)
+    {
+        // immediate start for tone tests
+        tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
+    }
+    else
+    {
+        // scheduled WSPR window
+        scheduler_.start();
+    }
 }
 
 /**
@@ -457,19 +535,17 @@ void WsprTransmitter::stopTransmission()
 }
 
 /**
- * @brief Gracefully stops and waits for the transmission thread.
+ * @brief Gracefully stops scheduler and any in-flight transmission, then cleans up.
  *
- * @details Combines stopTransmission() to signal the worker thread to
- *          exit, and join_transmission() to block until that thread has
- *          fully terminated. After this call returns, no transmission
- *          thread remains running.
+ * @details
+ *   1. Calls disableTransmission() to stop the scheduler thread and join any tx_thread_.
+ *   2. Performs DMA/PWM/mailbox cleanup.
  */
-void WsprTransmitter::shutdownTransmitter()
-{
-    stopTransmission();
-    join_transmission();
-    dma_cleanup();
-}
+ void WsprTransmitter::shutdownTransmitter()
+ {
+     disableTransmission();   // stops scheduler, signals & joins tx_thread_
+     dma_cleanup();           // unmaps peripherals, frees mailbox memory
+ }
 
 /**
  * @brief Check if the GPIO is bound to the clock.
@@ -1201,8 +1277,8 @@ void WsprTransmitter::transmit_symbol(
     const double &tsym,
     int &bufPtr)
 {
-    // Early‑exit if a stop was already requested
-    if (stop_requested_.load())
+    // Early-exit if a stop was already requested
+    if (stop_requested_.load(std::memory_order_acquire))
     {
         if (debug)
             std::cout << "DEBUG: transmit_symbol(" << sym_num
@@ -1210,158 +1286,170 @@ void WsprTransmitter::transmit_symbol(
         return;
     }
 
-    // Tone vs WSPR symbol?
     const bool is_tone = (tsym == 0.0);
-
-    // DMA table indices
-    const int f0_idx = sym_num * 2;
-    const int f1_idx = f0_idx + 1;
-
-    // Frequency bounds
-    const double f0_freq = trans_params_.dma_table_freq[f0_idx];
-    const double f1_freq = trans_params_.dma_table_freq[f1_idx];
-
-    // Desired tone frequency
-    const double tone_freq =
-        trans_params_.frequency - 1.5 * trans_params_.tone_spacing + sym_num * trans_params_.tone_spacing;
-    assert((tone_freq >= f0_freq) && (tone_freq <= f1_freq));
-
-    // Interpolation ratio
-    const double f0_ratio =
-        1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
-    if (debug)
-        std::cout << "DEBUG: f0_ratio = " << f0_ratio << std::endl;
-    assert((f0_ratio >= 0.0) && (f0_ratio <= 1.0));
-
-    // Total PWM clocks for this symbol
-    const long int n_pwmclk_per_sym =
-        std::round(F_PWM_CLK_INIT * tsym);
-    long int n_pwmclk_transmitted = 0;
-    long int n_f0_transmitted = 0;
+    const int  f0_idx  = sym_num * 2;
+    const int  f1_idx  = f0_idx + 1;
 
     if (debug)
         std::cout << "DEBUG: <instructions_[bufPtr] begin=0x"
-                  << std::hex
-                  << reinterpret_cast<unsigned long>(&instructions_[bufPtr])
-                  << std::dec << ">\n";
+                << std::hex
+                << reinterpret_cast<unsigned long>(&instructions_[bufPtr])
+                << std::dec << ">\n";
 
-    // Transmit
     if (is_tone)
     {
-        // Infinite tone until stopped
-        while (!stop_requested_.load())
+        // Continuous tone
+        while (!stop_requested_.load(std::memory_order_acquire))
         {
-            const long int n_pwmclk =
-                PWM_CLOCKS_PER_ITER_NOMINAL;
+            const long int n_pwmclk = PWM_CLOCKS_PER_ITER_NOMINAL;
 
-            // Point DMA to waveform
+            // SOURCE_AD
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
+                    return stop_requested_.load(std::memory_order_acquire)
+                        || static_cast<std::uintptr_t>(
+                               access_bus_address(DMA_BUS_BASE + 0x04))
+                               != reinterpret_cast<std::uintptr_t>(
+                                      instructions_[bufPtr].b);
+                });
+                if (stop_requested_.load(std::memory_order_acquire))
                     return;
-                usleep(100);
             }
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<long>(const_page_.b) + f0_idx * 4;
+                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
 
-            // Set transfer length
+            // TXFR_LEN
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
+                    return stop_requested_.load(std::memory_order_acquire)
+                        || static_cast<std::uintptr_t>(
+                               access_bus_address(DMA_BUS_BASE + 0x04))
+                               != reinterpret_cast<std::uintptr_t>(
+                                      instructions_[bufPtr].b);
+                });
+                if (stop_requested_.load(std::memory_order_acquire))
                     return;
-                usleep(100);
             }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
-                n_pwmclk;
+            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_pwmclk;
         }
     }
     else
     {
-        // Finite symbol
+        // Finite WSPR symbol
+        const long int n_pwmclk_per_sym = std::lround(F_PWM_CLK_INIT * tsym);
+        long int n_pwmclk_transmitted = 0;
+        long int n_f0_transmitted     = 0;
+
+        // Precompute interpolation ratio outside the loop
+        const double f0_freq = trans_params_.dma_table_freq[f0_idx];
+        const double f1_freq = trans_params_.dma_table_freq[f1_idx];
+        const double tone_freq =
+            trans_params_.frequency - 1.5 * trans_params_.tone_spacing + sym_num * trans_params_.tone_spacing;
+        const double f0_ratio =
+            1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
+        
+        if (debug)
+            std::cout << "DEBUG: f0_ratio = " << f0_ratio << std::endl;
+        assert((f0_ratio >= 0.0) && (f0_ratio <= 1.0));
+
         while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
-               !stop_requested_.load())
+               !stop_requested_.load(std::memory_order_acquire))
         {
-            // Compute clocks
+            // --- compute clocks for this chunk ---
             long int n_pwmclk =
                 PWM_CLOCKS_PER_ITER_NOMINAL;
-            n_pwmclk += std::round(
+            n_pwmclk += std::lround(
                 (std::rand() / (RAND_MAX + 1.0) - 0.5) * n_pwmclk);
-            if (n_pwmclk_transmitted + n_pwmclk >
-                n_pwmclk_per_sym)
-            {
-                n_pwmclk =
-                    n_pwmclk_per_sym - n_pwmclk_transmitted;
-            }
-            const long int n_f0 =
-                std::round(f0_ratio * (n_pwmclk_transmitted + n_pwmclk)) - n_f0_transmitted;
+            if (n_pwmclk_transmitted + n_pwmclk > n_pwmclk_per_sym)
+                n_pwmclk = n_pwmclk_per_sym - n_pwmclk_transmitted;
+
+            const long int n_f0 = std::lround(f0_ratio * (n_pwmclk_transmitted + n_pwmclk))
+                                 - n_f0_transmitted;
             const long int n_f1 = n_pwmclk - n_f0;
 
             // f0 SOURCE_AD
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
+                    return stop_requested_.load(std::memory_order_acquire)
+                        || static_cast<std::uintptr_t>(
+                               access_bus_address(DMA_BUS_BASE + 0x04))
+                               != reinterpret_cast<std::uintptr_t>(
+                                      instructions_[bufPtr].b);
+                });
+                if (stop_requested_.load(std::memory_order_acquire))
                     return;
-                usleep(100);
             }
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<long>(const_page_.b) + f0_idx * 4;
+                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
 
             // f0 TXFR_LEN
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
+                    return stop_requested_.load(std::memory_order_acquire)
+                        || static_cast<std::uintptr_t>(
+                               access_bus_address(DMA_BUS_BASE + 0x04))
+                               != reinterpret_cast<std::uintptr_t>(
+                                      instructions_[bufPtr].b);
+                });
+                if (stop_requested_.load(std::memory_order_acquire))
                     return;
-                usleep(100);
             }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
-                n_f0;
+            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f0;
 
             // f1 SOURCE_AD
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
+                    return stop_requested_.load(std::memory_order_acquire)
+                        || static_cast<std::uintptr_t>(
+                               access_bus_address(DMA_BUS_BASE + 0x04))
+                               != reinterpret_cast<std::uintptr_t>(
+                                      instructions_[bufPtr].b);
+                });
+                if (stop_requested_.load(std::memory_order_acquire))
                     return;
-                usleep(100);
             }
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<long>(const_page_.b) + f1_idx * 4;
+                reinterpret_cast<std::uintptr_t>(const_page_.b) + f1_idx * 4;
 
             // f1 TXFR_LEN
             bufPtr = (bufPtr + 1) & 0x3FF;
-            while (access_bus_address(DMA_BUS_BASE + 0x04) ==
-                   reinterpret_cast<long>(instructions_[bufPtr].b))
             {
-                if (stop_requested_.load())
+                std::unique_lock<std::mutex> lk(stop_mutex_);
+                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&] {
+                    return stop_requested_.load(std::memory_order_acquire)
+                        || static_cast<std::uintptr_t>(
+                               access_bus_address(DMA_BUS_BASE + 0x04))
+                               != reinterpret_cast<std::uintptr_t>(
+                                      instructions_[bufPtr].b);
+                });
+                if (stop_requested_.load(std::memory_order_acquire))
                     return;
-                usleep(100);
             }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
-                n_f1;
+            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f1;
 
             // Update counters
             n_pwmclk_transmitted += n_pwmclk;
-            n_f0_transmitted += n_f0;
+            n_f0_transmitted     += n_f0;
         }
     }
-
     // Final debug
     if (debug)
         std::cout << "DEBUG: <instructions_[bufPtr]=0x"
-                  << std::hex
-                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].v)
-                  << " 0x"
-                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].b)
-                  << std::dec << ">\n";
+                    << std::hex
+                    << reinterpret_cast<unsigned long>(instructions_[bufPtr].v)
+                    << " 0x"
+                    << reinterpret_cast<unsigned long>(instructions_[bufPtr].b)
+                    << std::dec << ">\n";
 }
 
 /**
@@ -1570,42 +1658,38 @@ void WsprTransmitter::create_dma_pages(
  */
 void WsprTransmitter::setup_dma()
 {
-    // 1) Figure out PLLD & mailbox flags
+    // 1) PLLD & mem‐flag
     get_plld_and_memflag();
 
-    // 2) Map peripherals  
-    //    - open /dev/mem  
-    //    - use MMapRegion so it auto-unmaps if anything throws
+    // 2) map peripherals
     int mem_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
     if (mem_fd < 0)
-        throw std::runtime_error("setup_dma: open(/dev/mem) failed: " + std::string(std::strerror(errno)));
-    MMapRegion region(mem_fd, discover_peripheral_base(), 0x01000000);
+        throw std::runtime_error(std::string("setup_dma: open /dev/mem: ") + std::strerror(errno));
+    off_t base = discover_peripheral_base();
+    MMapRegion region(mem_fd, base, kPageSize * 4096 /*=0x01000000*/);
     ::close(mem_fd);
-
-    // 3) Hand ownership of the mapping into dma_config_
     dma_config_.peripheral_base_virtual = region.get();
-    region.release();  // so ~MMapRegion() won't unmap now
+    region.release();
 
-    // 4) Snapshot the registers we’ll need to restore later
-    dma_config_.orig_gp0ctl     = access_bus_address(CM_GP0CTL_BUS);
-    dma_config_.orig_gp0div     = access_bus_address(CM_GP0DIV_BUS);
-    dma_config_.orig_pwm_ctl    = access_bus_address(PWM_BUS_BASE + 0x00);
-    dma_config_.orig_pwm_sta    = access_bus_address(PWM_BUS_BASE + 0x04);
-    dma_config_.orig_pwm_rng1   = access_bus_address(PWM_BUS_BASE + 0x10);
-    dma_config_.orig_pwm_rng2   = access_bus_address(PWM_BUS_BASE + 0x20);
-    dma_config_.orig_pwm_fifocfg= access_bus_address(PWM_BUS_BASE + 0x08);
+    // 3) snapshot regs
+    dma_config_.orig_gp0ctl      = access_bus_address(CM_GP0CTL_BUS);
+    dma_config_.orig_gp0div      = access_bus_address(CM_GP0DIV_BUS);
+    dma_config_.orig_pwm_ctl     = access_bus_address(PWM_BUS_BASE + 0x00);
+    dma_config_.orig_pwm_sta     = access_bus_address(PWM_BUS_BASE + 0x04);
+    dma_config_.orig_pwm_rng1    = access_bus_address(PWM_BUS_BASE + 0x10);
+    dma_config_.orig_pwm_rng2    = access_bus_address(PWM_BUS_BASE + 0x20);
+    dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
 
-    // 5) Open the mailbox  
-    //    - MailboxHandle will close on destruction if we throw
+    // 4) open mailbox & pool
     MailboxHandle mbox;
     mailbox_.handle = mbox.get();
-    mbox.release();  // now WsprTransmitter owns it
+    mbox.release();
+    MailboxMemoryPool pool(mailbox_.handle, /*numpages=*/1025, dma_config_.mem_flag);
 
-    // 6) Build all your DMA pages  
-    //    If this throws, both the mapping and the mailbox will be cleaned up automatically.
+    // 5) build DMA pages (old signature)
     create_dma_pages(const_page_, instr_page_, instructions_);
 
-    // 7) Mark that everything’s up
+    // 6) done
     dma_setup_done_ = true;
 }
 

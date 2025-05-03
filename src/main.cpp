@@ -26,6 +26,26 @@ static std::atomic<bool> g_terminate{false};
 // A self-pipe so main() can wake up out of select() or cv waits if needed
 static int sig_pipe_fds[2] = {-1, -1};
 
+// RAII helper to disable/restore canonical mode
+struct TermiosGuard
+{
+    termios old_, cur_;
+    TermiosGuard()
+    {
+        tcgetattr(STDIN_FILENO, &old_);
+        cur_ = old_;
+        cur_.c_lflag &= ~(ICANON|ECHO);
+        cur_.c_cc[VMIN]  = 1;
+        cur_.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &cur_);
+    }
+
+    ~TermiosGuard()
+    {
+        tcsetattr(STDIN_FILENO, TCSANOW, &old_);
+    }
+};
+
 /**
  * @brief Reads a single character from standard input without waiting for Enter.
  *
@@ -48,56 +68,84 @@ int getch()
 
 /**
  * @brief Pauses the program until the user presses the spacebar.
+ *
+ * Blocks until either the user hits SPACE, or we get signaled on our pipe.
  */
-void pause_for_space()
+void wait_for_space_or_signal()
 {
-    while (getch() != ' ')
-        ; // spin until stop or spacebar
+    TermiosGuard tguard;  // switch to non-canonical mode for the duration
+
+    char c;
+    while (!g_terminate.load(std::memory_order_acquire))
+    {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        FD_SET(sig_pipe_fds[0],   &rfds);
+        int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
+
+        if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0)
+        {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        if (FD_ISSET(sig_pipe_fds[0], &rfds))
+        {
+            // signal arrived — bail out
+            break;
+        }
+        if (FD_ISSET(STDIN_FILENO, &rfds))
+        {
+            if (::read(STDIN_FILENO, &c, 1) == 1 && c == ' ')
+                break;
+        }
+    }
 }
 
 bool select_wspr()
 {
-    std::string input;
+    TermiosGuard tg;  // raw input
+    std::cout << "Select mode:\n"
+              << "  1) WSPR\n"
+              << "  2) TONE\n"
+              << "Enter [1/2]: " << std::flush;
 
-    std::cout << "Select mode:\n";
-    std::cout << "  1) WSPR\n";
-    std::cout << "  2) TONE\n";
-    std::cout << "Enter choice [1-2, default 1]: ";
-    std::getline(std::cin, input);
+    fd_set rfds;
+    while (!g_terminate.load()) {
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        FD_SET(sig_pipe_fds[0],   &rfds);
+        int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
 
-    int choice = 1;
-    try
-    {
-        if (!input.empty())
-        {
-            choice = std::stoi(input);
+        if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0) {
+            if (errno==EINTR) continue;
+            throw std::runtime_error("select failed");
+        }
+        if (FD_ISSET(sig_pipe_fds[0], &rfds)) {
+            // got Ctrl-C
+            return false;  // or exit early
+        }
+        if (FD_ISSET(STDIN_FILENO, &rfds)) {
+            char c;
+            if (::read(STDIN_FILENO, &c, 1)==1) {
+                if (c=='2') return false;
+                else           return true;  // default to 1/WSPR
+            }
         }
     }
-    catch (...)
-    {
-        choice = 1; // fallback to default
-    }
-    return (choice == 1);
+    return false;
 }
 
-void sig_handler(int sig = SIGTERM)
+void sig_handler(int)
 {
-    // Called when exiting or when a signal is received.
-
-    // Thread safe write() rather than std::cout
-    const char msg1[] = "Caught signal\n";
-    write(STDERR_FILENO, msg1, sizeof(msg1) - 1);
-    const char msg2[] = "Shutting down transmissions.\n";
-    write(STDERR_FILENO, msg2, sizeof(msg2) - 1);
+    const char msg[] = "Caught signal\nShutting down transmissions.\n";
+    write(STDERR_FILENO, msg, sizeof(msg)-1);
     wsprTransmitter.shutdownTransmitter();
-
-    // Set our “please quit” flag
-    g_terminate.store(true, std::memory_order_release);
-
-    // Write a byte to our self-pipe so any select()/poll()/cv_wait can wake
-    // up (write() is async-signal-safe; std::cout and strsignal() are not.)
+    g_terminate.store(true);
+    // wake any select()/poll() on your self-pipe
     const char wake = 1;
-    ::write(sig_pipe_fds[1], &wake, 1);
+    write(sig_pipe_fds[1], &wake, 1);
 }
 
 void start_cb()
@@ -117,6 +165,11 @@ void end_cb()
 
 int main()
 {
+    if (::pipe(sig_pipe_fds) < 0) {
+        perror("pipe");
+        return 1;
+    }
+
     // — set up signals —
     std::array<int, 6> signals = {SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT};
     for (int s : signals)
@@ -131,6 +184,11 @@ int main()
 
     // — pick mode —
     bool isWspr = select_wspr();
+    if (g_terminate.load(std::memory_order_acquire))
+    {
+        // we saw Ctrl-C in the prompt, so bail out immediately
+        return 0;
+    }
     std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << "\n";
 
     // — get PPM correction and schedule priority —
@@ -157,7 +215,7 @@ int main()
     if (!isWspr)
     {
         std::cout << "Press <spacebar> to begin test tone.\n";
-        pause_for_space();
+        wait_for_space_or_signal();
     }
 
     // — kick off the scheduler/transmission thread —
@@ -165,17 +223,26 @@ int main()
 
     if (isWspr)
     {
-        // block until end_cb() fires
         std::unique_lock<std::mutex> lk(g_end_mtx);
-        g_end_cv.wait(lk, []
-                      { return g_transmission_done; });
-        std::cout << "WSPR transmission complete.\n";
+        // wake every 100 ms to check for either completion or a Ctrl-C
+        while (!g_transmission_done && !g_terminate.load(std::memory_order_acquire))
+        {
+            g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
+        }
+        if (g_transmission_done)
+        {
+            std::cout << "WSPR transmission complete.\n";
+        }
+        else
+        {
+            std::cout << "Interrupted. Aborting WSPR transmission.\n";
+        }
     }
     else
     {
         // tone mode: stop on spacebar
         std::cout << "Press <spacebar> to end test tone.\n";
-        pause_for_space();
+        wait_for_space_or_signal();
         std::cout << "Test tone stopped.\n";
     }
 
