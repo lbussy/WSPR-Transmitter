@@ -700,7 +700,6 @@ inline void WsprTransmitter::fire_end_cb(const std::string &msg)
  */
 void WsprTransmitter::transmit()
 {
-    std::cout << "Frequency: " << trans_params_.frequency << std::endl;
     // If we're not in tone‐test mode and frequency was zeroed out, skip.
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {

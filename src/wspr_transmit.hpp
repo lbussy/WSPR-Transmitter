@@ -1152,6 +1152,10 @@ private:
         /// Start the scheduler thread
         void start()
         {
+            // if we already spawned a scheduler thread, clean it up first
+            if (thread_.joinable())
+                thread_.join();
+
             stop_requested_.store(false, std::memory_order_release);
             thread_ = std::thread(&TransmissionScheduler::run, this);
         }
@@ -1221,12 +1225,12 @@ private:
 
                 parent_->stop_requested_.store(false, std::memory_order_release);
 
-                // If a previous TX is still running, wait for it to finish
+                // If there is an existing transmit thread, wait for it to finish:
                 if (parent_->tx_thread_.joinable())
                 {
                     parent_->tx_thread_.join();
                 }
-                // Transmit
+                // Now it's safe to start a new transmit
                 parent_->tx_thread_ = std::thread(&WsprTransmitter::thread_entry, parent_);
             }
         }
