@@ -101,11 +101,10 @@ public:
     WsprTransmitter &operator=(WsprTransmitter &&) = delete;
 
     /**
-     * @details Defines the function prototype for user‑provided callbacks that
-     *          are called when a WSPR transmission completes. The callback
-     *          takes no parameters and returns nothing.
+     * @brief Signature for user-provided transmission callbacks.
+     * @param msg  A message string you may choose to ignore.
      */
-    using CompletionCallback = std::function<void()>;
+    using Callback = std::function<void(const std::string &msg)>;
 
     /**
      * @brief Install optional callbacks for transmission start/end.
@@ -118,8 +117,8 @@ public:
      *   symbol is sent (but before DMA/PWM are torn down).  If null,
      *   no completion notification is made.
      */
-    void setTransmissionCallbacks(CompletionCallback start_cb = {},
-                                  CompletionCallback end_cb = {});
+    void setTransmissionCallbacks(Callback start_cb = {},
+                                  Callback end_cb = {});
 
     /**
      * @brief Configure and start a WSPR transmission.
@@ -249,7 +248,7 @@ private:
      * Users can assign a function via `setTransmissionCallbacks()` to
      * perform any setup or logging when transmission is about to start.
      */
-    CompletionCallback on_transmit_start_{};
+    Callback on_transmit_start_{};
 
     /**
      * @brief Invoked immediately after all WSPR symbols have been sent.
@@ -259,7 +258,7 @@ private:
      * Users can assign a function via `setTransmissionCallbacks()` to
      * perform any cleanup or notification when a WSPR transmission completes.
      */
-    CompletionCallback on_transmit_end_{};
+    Callback on_transmit_end_{};
 
     /**
      * @brief Background thread for carrying out the transmission.
@@ -628,13 +627,13 @@ private:
         int mem_flag;                  ///< Mailbox memory allocation flags for DMA.
         void *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
         size_t peripheral_map_size;
-        uint32_t orig_gp0ctl;          ///< Saved GP0CTL register (clock control).
-        uint32_t orig_gp0div;          ///< Saved GP0DIV register (clock divider).
-        uint32_t orig_pwm_ctl;         ///< Saved PWM control register.
-        uint32_t orig_pwm_sta;         ///< Saved PWM status register.
-        uint32_t orig_pwm_rng1;        ///< Saved PWM range register 1.
-        uint32_t orig_pwm_rng2;        ///< Saved PWM range register 2.
-        uint32_t orig_pwm_fifocfg;     ///< Saved PWM FIFO configuration register.
+        uint32_t orig_gp0ctl;      ///< Saved GP0CTL register (clock control).
+        uint32_t orig_gp0div;      ///< Saved GP0DIV register (clock divider).
+        uint32_t orig_pwm_ctl;     ///< Saved PWM control register.
+        uint32_t orig_pwm_sta;     ///< Saved PWM status register.
+        uint32_t orig_pwm_rng1;    ///< Saved PWM range register 1.
+        uint32_t orig_pwm_rng2;    ///< Saved PWM range register 2.
+        uint32_t orig_pwm_fifocfg; ///< Saved PWM FIFO configuration register.
 
         /**
          * @brief Construct a new DMAConfig with default (nominal) settings.
@@ -753,19 +752,19 @@ private:
      * - **(13 bits reserved):** Unused/reserved.
      * - **PASSWD (8 bits):** Password field required to modify the clock control registers.
      */
-     struct GPCTL
-     {
-         uint32_t SRC    : 4;  ///< Clock source selection.
-         uint32_t ENAB   : 1;  ///< Enable bit.
-         uint32_t KILL   : 1;  ///< Kill bit.
-         uint32_t        : 1;  ///< Reserved.
-         uint32_t BUSY   : 1;  ///< Busy flag.
-         uint32_t FLIP   : 1;  ///< Phase inversion flag.
-         uint32_t MASH   : 2;  ///< MASH filter.
-         uint32_t        : 13; ///< Reserved.
-         uint32_t PASSWD : 8;  ///< Password field.
-     };
-     static_assert(sizeof(GPCTL) == 4, "GPCTL must be exactly 32 bits.");
+    struct GPCTL
+    {
+        uint32_t SRC : 4;    ///< Clock source selection.
+        uint32_t ENAB : 1;   ///< Enable bit.
+        uint32_t KILL : 1;   ///< Kill bit.
+        uint32_t : 1;        ///< Reserved.
+        uint32_t BUSY : 1;   ///< Busy flag.
+        uint32_t FLIP : 1;   ///< Phase inversion flag.
+        uint32_t MASH : 2;   ///< MASH filter.
+        uint32_t : 13;       ///< Reserved.
+        uint32_t PASSWD : 8; ///< Password field.
+    };
+    static_assert(sizeof(GPCTL) == 4, "GPCTL must be exactly 32 bits.");
 
     /**
      * @brief DMA Engine Status Registers.
@@ -807,6 +806,28 @@ private:
         volatile unsigned int NEXTCONBK; ///< Address of the next control block.
         volatile unsigned int DEBUG;     ///< Debug register for diagnostics.
     };
+
+    /**
+     * @brief Safely invoke the user’s start‐transmission callback.
+     *
+     * @details Checks whether a start callback has been set, and if so,
+     *          calls it with an empty message string to satisfy the
+     *          `Callback` signature.
+     *
+     * @param msg  A string message to pass into the callback.
+     */
+    void fire_start_cb(const std::string &msg = {});
+
+    /**
+     * @brief Safely invoke the user’s end‐transmission callback with a message.
+     *
+     * @details Checks whether an end callback has been set, and if so,
+     *          calls it with the provided message. Useful for reporting
+     *          completion status or diagnostics.
+     *
+     * @param msg  A string message to pass into the callback.
+     */
+    void fire_end_cb(const std::string &msg = {});
 
     /**
      * @brief Perform DMA-driven RF transmission.
@@ -1015,8 +1036,7 @@ private:
     void transmit_symbol(
         const int &sym_num,
         const double &tsym,
-        int &bufPtr
-    );
+        int &bufPtr);
 
     /**
      * @brief Disables and resets the DMA engine.
@@ -1065,8 +1085,7 @@ private:
     void create_dma_pages(
         struct PageInfo &const_page_,
         struct PageInfo &instr_page_,
-        struct PageInfo instructions_[]
-    );
+        struct PageInfo instructions_[]);
 
     /**
      * @brief Configure and initialize the DMA system for WSPR transmission.
@@ -1159,13 +1178,13 @@ private:
             using namespace std::chrono;
 
             // “now” and its epoch‐seconds
-            auto now    = system_clock::now();
-            auto secs   = duration_cast<seconds>(now.time_since_epoch()).count();
+            auto now = system_clock::now();
+            auto secs = duration_cast<seconds>(now.time_since_epoch()).count();
 
             // Choose cycle length: 2 min = 120 s or 15 min = 900 s
             const int cycle = (parent_->trans_params_.wspr_mode == WsprMode::WSPR15)
-                                ? 15 * 60
-                                : 2  * 60;
+                                  ? 15 * 60
+                                  : 2 * 60;
 
             // Integer‐divide to find current cycle index
             auto idx = secs / cycle;
@@ -1174,10 +1193,13 @@ private:
             // otherwise bump to the next cycle:
             auto base = idx * cycle;
             seconds target_secs;
-            if (secs < base + 1) {
+            if (secs < base + 1)
+            {
                 // still before “:XX:01” of this cycle
                 target_secs = seconds{base + 1};
-            } else {
+            }
+            else
+            {
                 // past “:XX:01”, schedule at next cycle’s +1s
                 target_secs = seconds{(idx + 1) * cycle + 1};
             }

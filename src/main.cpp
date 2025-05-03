@@ -4,18 +4,18 @@
 #include "wspr_transmit.hpp"
 
 // C++ Standard Library
-#include <array>               // std::array for signal list
-#include <condition_variable>  // g_end_cv
-#include <csignal>             // sigaction, std::signal
-#include <cstring>             // strsignal()
-#include <cstdio>              // getchar()
-#include <iostream>            // std::cout, std::getline
-#include <mutex>               // g_end_mtx
-#include <string>              // std::string
+#include <array>              // std::array for signal list
+#include <condition_variable> // g_end_cv
+#include <csignal>            // sigaction, std::signal
+#include <cstring>            // strsignal()
+#include <cstdio>             // getchar()
+#include <iostream>           // std::cout, std::getline
+#include <mutex>              // g_end_mtx
+#include <string>             // std::string
 
 // POSIX & System-Specific Headers
-#include <termios.h>           // tcgetattr(), tcsetattr()
-#include <unistd.h>            // STDIN_FILENO
+#include <termios.h> // tcgetattr(), tcsetattr()
+#include <unistd.h>  // STDIN_FILENO
 
 // at file scope
 static std::mutex g_end_mtx;
@@ -34,8 +34,8 @@ struct TermiosGuard
     {
         tcgetattr(STDIN_FILENO, &old_);
         cur_ = old_;
-        cur_.c_lflag &= ~(ICANON|ECHO);
-        cur_.c_cc[VMIN]  = 1;
+        cur_.c_lflag &= ~(ICANON | ECHO);
+        cur_.c_cc[VMIN] = 1;
         cur_.c_cc[VTIME] = 0;
         tcsetattr(STDIN_FILENO, TCSANOW, &cur_);
     }
@@ -73,7 +73,7 @@ int getch()
  */
 void wait_for_space_or_signal()
 {
-    TermiosGuard tguard;  // switch to non-canonical mode for the duration
+    TermiosGuard tguard; // switch to non-canonical mode for the duration
 
     char c;
     while (!g_terminate.load(std::memory_order_acquire))
@@ -81,12 +81,13 @@ void wait_for_space_or_signal()
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(STDIN_FILENO, &rfds);
-        FD_SET(sig_pipe_fds[0],   &rfds);
+        FD_SET(sig_pipe_fds[0], &rfds);
         int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
 
         if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0)
         {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             break;
         }
 
@@ -105,32 +106,40 @@ void wait_for_space_or_signal()
 
 bool select_wspr()
 {
-    TermiosGuard tg;  // raw input
+    TermiosGuard tg; // raw input
     std::cout << "Select mode:\n"
               << "  1) WSPR\n"
               << "  2) TONE\n"
               << "Enter [1/2]: " << std::flush;
 
     fd_set rfds;
-    while (!g_terminate.load()) {
+    while (!g_terminate.load())
+    {
         FD_ZERO(&rfds);
         FD_SET(STDIN_FILENO, &rfds);
-        FD_SET(sig_pipe_fds[0],   &rfds);
+        FD_SET(sig_pipe_fds[0], &rfds);
         int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
 
-        if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0) {
-            if (errno==EINTR) continue;
+        if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0)
+        {
+            if (errno == EINTR)
+                continue;
             throw std::runtime_error("select failed");
         }
-        if (FD_ISSET(sig_pipe_fds[0], &rfds)) {
+        if (FD_ISSET(sig_pipe_fds[0], &rfds))
+        {
             // got Ctrl-C
-            return false;  // or exit early
+            return false; // or exit early
         }
-        if (FD_ISSET(STDIN_FILENO, &rfds)) {
+        if (FD_ISSET(STDIN_FILENO, &rfds))
+        {
             char c;
-            if (::read(STDIN_FILENO, &c, 1)==1) {
-                if (c=='2') return false;
-                else           return true;  // default to 1/WSPR
+            if (::read(STDIN_FILENO, &c, 1) == 1)
+            {
+                if (c == '2')
+                    return false;
+                else
+                    return true; // default to 1/WSPR
             }
         }
     }
@@ -140,7 +149,7 @@ bool select_wspr()
 void sig_handler(int)
 {
     const char msg[] = "Caught signal\nShutting down transmissions.\n";
-    write(STDERR_FILENO, msg, sizeof(msg)-1);
+    write(STDERR_FILENO, msg, sizeof(msg) - 1);
     wsprTransmitter.shutdownTransmitter();
     g_terminate.store(true);
     // wake any select()/poll() on your self-pipe
@@ -148,14 +157,29 @@ void sig_handler(int)
     write(sig_pipe_fds[1], &wake, 1);
 }
 
-void start_cb()
+void start_cb(const std::string &msg = {})
 {
-    std::cout << "[CALLBACK] Started transmission." << std::endl;
+    if (!msg.empty())
+    {
+        std::cout << "[CALLBACK] Started transmission (" << msg << ")." << std::endl;
+    }
+    else
+    {
+        std::cout << "[CALLBACK] Started transmission." << std::endl;
+    }
 }
 
-void end_cb()
+void end_cb(const std::string &msg = {})
 {
-    std::cout << "[CALLBACK] Completed transmission." << std::endl;
+    if (!msg.empty())
+    {
+        // handle the extra info
+    }
+    else
+    {
+        std::cout << "[CALLBACK] Completed transmission (" << msg << ")." << std::endl;
+    }
+
     {
         std::lock_guard<std::mutex> lk(g_end_mtx);
         g_transmission_done = true;
@@ -165,7 +189,8 @@ void end_cb()
 
 int main()
 {
-    if (::pipe(sig_pipe_fds) < 0) {
+    if (::pipe(sig_pipe_fds) < 0)
+    {
         perror("pipe");
         return 1;
     }
@@ -200,7 +225,7 @@ int main()
     {
         wsprTransmitter.setTransmissionCallbacks(start_cb, end_cb);
         wsprTransmitter.setupTransmission(
-            7040100.0, 0, config.ppm,
+            0.0, 0, config.ppm,
             "AA0NT", "EM18", 20, /*use_offset=*/true);
     }
     else
