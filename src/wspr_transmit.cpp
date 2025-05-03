@@ -1605,20 +1605,20 @@ void WsprTransmitter::create_dma_pages(
 
     // Configure the PWM clock (disable, set divisor, enable)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000026; // Source = PLLD, disable
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(CLK_BUS_BASE + 41 * 4) = 0x5A002000; // Set PWM divider to 2 (250MHz)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000016; // Source = PLLD, enable
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     // Configure PWM registers
     access_bus_address(PWM_BUS_BASE + 0x0) = 0; // Disable PWM
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(PWM_BUS_BASE + 0x4) = -1; // Clear status errors
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(PWM_BUS_BASE + 0x10) = 32; // Set default range
     access_bus_address(PWM_BUS_BASE + 0x20) = 32;
     access_bus_address(PWM_BUS_BASE + 0x0) = -1; // Enable FIFO mode, repeat, serializer, and channel
-    usleep(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     access_bus_address(PWM_BUS_BASE + 0x8) = (1 << 31) | 0x0707; // Enable DMA
 
     // Obtain the base address as an integer pointer
