@@ -435,7 +435,7 @@ void WsprTransmitter::setupTransmission(
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> dis(-1.0, 1.0);
-        // Skip offset if o (we are skipping)
+        // Skip offset if frequency is 0.0
         if (trans_params_.frequency != 0.0)
             trans_params_.frequency += dis(gen) * offset_freq;
     }
@@ -462,10 +462,10 @@ void WsprTransmitter::setupTransmission(
     if (debug)
     {
         std::cout << std::setprecision(30)
-                  << "DEBUG: dma_table_freq[0] = " << trans_params_.dma_table_freq[0] << std::endl
-                  << "DEBUG: dma_table_freq[1] = " << trans_params_.dma_table_freq[1] << std::endl
-                  << "DEBUG: dma_table_freq[2] = " << trans_params_.dma_table_freq[2] << std::endl
-                  << "DEBUG: dma_table_freq[3] = " << trans_params_.dma_table_freq[3] << std::endl;
+                  << "[DEBUG WsprTransmitter] dma_table_freq[0] = " << trans_params_.dma_table_freq[0] << std::endl
+                  << "[DEBUG WsprTransmitter] dma_table_freq[1] = " << trans_params_.dma_table_freq[1] << std::endl
+                  << "[DEBUG WsprTransmitter] dma_table_freq[2] = " << trans_params_.dma_table_freq[2] << std::endl
+                  << "[DEBUG WsprTransmitter] dma_table_freq[3] = " << trans_params_.dma_table_freq[3] << std::endl;
     }
 }
 
@@ -485,7 +485,8 @@ void WsprTransmitter::updateDMAForPPM(double ppm_new)
     // Pass in your current center frequency so it can adjust if needed.
     double center_actual = trans_params_.frequency;
     setup_dma_freq_table(center_actual);
-    trans_params_.frequency = center_actual;
+    if (trans_params_.frequency != 0.0)
+        trans_params_.frequency = center_actual;
 }
 
 /**
@@ -715,7 +716,7 @@ inline void WsprTransmitter::fire_end_cb(const std::string &msg)
 {
     if (on_transmit_end_)
     {
-        on_transmit_end_(std::string{});
+        on_transmit_end_(msg);
     }
 }
 
@@ -740,7 +741,7 @@ void WsprTransmitter::transmit()
     {
         if (debug)
         {
-            std::cerr << "WsprTransmitter::transmit() Skipping transmission (frequency = 0.0.)" << std::endl;
+            std::cerr << "[DEBUG WsprTransmitter] transmit() Skipping transmission (frequency = 0.0.)" << std::endl;
         }
         fire_end_cb("Skipping transmission (frequency = 0.0.)");
         return;
@@ -751,7 +752,7 @@ void WsprTransmitter::transmit()
     {
         if (debug)
         {
-            std::cerr << "WsprTransmitter::transmit(): transmit() aborted before start." << std::endl;
+            std::cerr << "[DEBUG WsprTransmitter] transmit(): transmit() aborted before start." << std::endl;
         }
         fire_end_cb("Transmission aborted before start.");
         return;
@@ -1230,7 +1231,7 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     if (debug)
     {
         // Debug output: Show allocated bus & virtual addresses
-        std::cout << "DEBUG: allocate_memory_pool bus_addr=0x"
+        std::cout << "[DEBUG WsprTransmitter] allocate_memory_pool bus_addr=0x"
                   << std::hex << mailbox_.bus_addr
                   << " virt_addr=0x" << reinterpret_cast<unsigned long>(mailbox_.virt_addr)
                   << " mem_ref=0x" << mailbox_.mem_ref
@@ -1264,7 +1265,7 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
     if (debug)
     {
         // Debug print: Displays allocated memory details.
-        std::cout << "DEBUG: get_real_mem_page_from_pool bus_addr=0x"
+        std::cout << "[DEBUG WsprTransmitter] get_real_mem_page_from_pool bus_addr=0x"
                   << std::hex << reinterpret_cast<uintptr_t>(*bAddr)
                   << " virt_addr=0x" << reinterpret_cast<uintptr_t>(*vAddr)
                   << std::dec << std::endl;
@@ -1392,7 +1393,7 @@ void WsprTransmitter::transmit_symbol(
     if (stop_requested_.load(std::memory_order_acquire))
     {
         if (debug)
-            std::cout << "DEBUG: transmit_symbol(" << sym_num
+            std::cout << "[DEBUG WsprTransmitter] transmit_symbol(" << sym_num
                       << ") aborted before start." << std::endl;
         return;
     }
@@ -1402,7 +1403,7 @@ void WsprTransmitter::transmit_symbol(
     const int f1_idx = f0_idx + 1;
 
     if (debug)
-        std::cout << "DEBUG: <instructions_[bufPtr] begin = 0x"
+        std::cout << "[DEBUG WsprTransmitter] <instructions_[bufPtr] begin = 0x"
                   << std::hex
                   << reinterpret_cast<unsigned long>(&instructions_[bufPtr])
                   << std::dec << ">" << std::endl;
@@ -1456,7 +1457,7 @@ void WsprTransmitter::transmit_symbol(
             1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
 
         if (debug)
-            std::cout << "DEBUG: f0_ratio = " << f0_ratio << std::endl;
+            std::cout << "[DEBUG WsprTransmitter] f0_ratio = " << f0_ratio << std::endl;
         assert((f0_ratio >= 0.0) && (f0_ratio <= 1.0));
 
         while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
@@ -1530,7 +1531,7 @@ void WsprTransmitter::transmit_symbol(
     }
     // Final debug
     if (debug)
-        std::cout << "DEBUG: <instructions_[bufPtr] = 0x"
+        std::cout << "[DEBUG WsprTransmitter] <instructions_[bufPtr] = 0x"
                   << std::hex
                   << reinterpret_cast<unsigned long>(instructions_[bufPtr].v)
                   << " 0x"
@@ -1800,7 +1801,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
     if (std::floor(div_lo) != std::floor(div_hi))
     {
         center_freq_actual = dma_config_.plld_clock_frequency / std::floor(div_lo) - 1.6 * trans_params_.tone_spacing;
-        if (debug)
+        if (debug && trans_params_.frequency != 0.0)
         {
             std::stringstream temp;
             temp << std::fixed << std::setprecision(6)
