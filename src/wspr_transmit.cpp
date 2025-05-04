@@ -1804,7 +1804,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
         {
             std::stringstream temp;
             temp << std::fixed << std::setprecision(6)
-                 << "Warning: center frequency has been changed to "
+                 << "DEBUG: center frequency has been changed to "
                  << center_freq_actual / 1e6 << " MHz";
             std::cerr << temp.str() << " because of hardware limitations." << std::endl;
         }
