@@ -1,4 +1,3 @@
-// config_handler.cpp
 #include "config_handler.hpp"
 
 // Definition of the global configuration object.

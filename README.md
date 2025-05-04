@@ -1,93 +1,181 @@
+<!-- omit in toc -->
 # WsprTransmitter
 
-A C++17 class for transmitting WSPR messages or continuous test tones using DMA and PWM on Raspberry Pi. Runs in a dedicated real-time thread with controllable scheduling policy and priority.
+A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter) transmission on Raspberry Pi or other Linux systems.  This library can be used standalone (via `main.cpp` demo) or incorporated into other projects by simply including `wspr_transmit.hpp` and `wspr_transmit.cpp`.
 
-## Features
+<!-- omit in toc -->
+## Table of Contents
+- [Repository Layout](#repository-layout)
+- [Dependencies](#dependencies)
+- [Building](#building)
+- [Public API](#public-api)
+  - [Class: `WsprTransmitter`](#class-wsprtransmitter)
+    - [Construction \& Destruction](#construction--destruction)
+    - [Callbacks](#callbacks)
+    - [Configuration](#configuration)
+    - [Transmission Control](#transmission-control)
+    - [Status \& Debug](#status--debug)
+- [Demo](#demo)
+- [License](#license)
 
-- **WSPR & Test-Tone**: Supports both timed WSPR symbol sequences and indefinite test-tone transmission.
-- **Real-Time Threading**: Runs transmission in a separate `std::thread` with configurable POSIX scheduling policy (`SCHED_FIFO`, `SCHED_RR`, `SCHED_OTHER`) and priority.
-- **Clean Shutdown**: Provides `stopTransmission()`, and `shutdownTransmitter()` for safe, coordinated thread termination.
-- **DMA-Based**: Uses DMA control blocks and PWM clocks for precise timing.
-- **Callback Support**: Optional `on_transmission_complete` callback for event-driven programs.
+---
 
-## Repository Structure
+## Repository Layout
 
-```text
-├── src/
-│   └── wspr_transmit.hpp   # Class declaration and public API
-│   └── wspr_transmit.cpp   # Class implementation
-│   └── main.cpp            # Sample usage in a standalone application
-│   └── config_handler.cpp  # Supports sample usage in a standalone application
-│   └── utils.cpp           # Supports sample usage in a standalone application
-│   └── utils.hpp           # Supports sample usage in a standalone application
-│   └── Makefile            # Compile the sample usage application
-└── README.md               # This file
+```
+/src
+  ├── main.cpp             # Example/demo application
+  ├── Makefile             # Build script (assumes dependencies at peer level)
+  ├── wspr_transmit.hpp    # Public header
+  └── wspr_transmit.cpp    # Implementation
+
+/external
+  ├── config_handler.hpp   # (Optional) shared config struct
+  ├── config_handler.cpp
+  ├── utils.hpp
+  └── utils.cpp            # Helper: PPM from chrony
 ```
 
-## Requirements
+## Dependencies
 
-- C++17 compiler (e.g. `g++ 9+`)
-- POSIX-compliant OS (Raspberry Pi OS recommended)
-- Root or `CAP_SYS_NICE` privileges for real-time scheduling
-- [Broadcom-Mailbox](https://github.com/lbussy/Broadcom-Mailbox) as a submodule for Mailbox methods
-- [WSPR-Message](https://github.com/lbussy/WSPR-Message) as a submodule for WSPR Symbol generations
+* **WSPR-Message** (symbol generation) — expected at `../../WSPR-Message/src`
+* **Broadcom-Mailbox** (DMA/mailbox interface) — expected at `../../Broadcom-Mailbox/src`
+
+The current Makefile assumes the dependencies are at the same folder level as this repo in a larger project.
+
+> **Note:** This is where the `Makefile` includes the dependencies:
+>
+> ```make
+> SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Message/src)
+> SUBMODULE_SRCDIRS += $(wildcard ../../Broadcom-Mailbox/src)
+> ```
+>
+> If your configuration is different, edit `Makefile` accordingly.
+
+---
 
 ## Building
+
+To build as a stand-alone demo:
 
 ```bash
 cd src
 make debug
-make test
+sudo ./build/bin/wspr-transmitter_test
 ```
 
-## Usage Example
+* Requires linking against pthreads (`-pthread`).
+* Must be run as root (for `/dev/mem` access).
+
+The `Makefile` is quite comprehensive and includes a `help` argument:
+
+```bash
+$ make help
+
+Available targets:
+  release    Build optimized binary
+  debug      Build debug binary
+  test       Run tests
+  gdb        Debug with gdb
+  lint       Static analysis
+  macros     Show macros
+  clean      Remove build artifacts
+  help       This message
+```
+
+---
+
+## Public API
+
+### Class: `WsprTransmitter`
+
+#### Construction & Destruction
 
 ```cpp
-#include "wspr_transmit.hpp"
-#include <iostream>
-
-int main() {
-    WsprTransmitter tx;
-
-    // Configure for test-tone:
-    tx.setupTransmission(7.040100e6, 0, 12, "", "", 0, false);
-
-    // Start in real-time thread (FIFO, priority 30)
-    tx.startTransmission(SCHED_FIFO, 30);
-
-    // Add some wait/loop here
-
-    // Clean shutdown
-    tx.shutdownTransmitter();
-    tx.dma_cleanup();
-
-    std::cout << "Transmission stopped." << std::endl;
-    return 0;
-}
+WsprTransmitter();        // default ctor
+~WsprTransmitter();       // stops and cleans up
 ```
 
-## API Reference
+#### Callbacks
 
-### `void setupTransmission(double freq, int tone, int ppm, const std::string &call = "", const std::string &grid = "", int power_dBm = 0, bool isWSPR = false)`
+```cpp
+using Callback = std::function<void(const std::string &msg)>;
+void setTransmissionCallbacks(
+    Callback on_start = {},
+    Callback on_end   = {});
+```
 
-Configure frequency, PPM adjustment, power, callsign/grid (for WSPR), and mode.
+* `on_start` fires just before transmission
+* `on_end` fires immediately after symbols/tone finish
 
-### `void startTransmission(int policy, int priority)`
+#### Configuration
 
-Launches transmission in a background thread with the given scheduling policy and priority.
+* Fully initialize frequency, power, PPM, callsign/grid, offset:
 
-### `void stopTransmission()`
+```cpp
+void setupTransmission(
+    double frequency,
+    int    power_dbm,
+    double ppm,
+    std::string callsign = "",
+    std::string grid     = "",
+    bool    use_offset   = false
+);
+```
+* Rebuild DMA frequency table when PPM changes at runtime:
 
-Signals the transmit thread to exit at the next safe point.
+```cpp
+void updateDMAForPPM(double ppm_new);
+```
 
-### `void shutdownTransmitter()`
+* POSIX scheduling for the future transmit thread (SCHED\_FIFO/RR):
 
-Convenience: calls `stopTransmission()` then `join_transmission()`.
+```cpp
+void setThreadScheduling(int policy, int priority);
+```
 
-### `std::function<void()> on_transmission_complete`
+#### Transmission Control
 
-Optional callback invoked in the transmit thread when `transmit()` finishes.
+```cpp
+void enableTransmission();   // non-blocking: tone or scheduler
+void disableTransmission();  // cancel scheduler + any active transmit
+void stopTransmission();     // request in-flight stop
+void shutdownTransmitter();  // disable + cleanup
+```
+
+#### Status & Debug
+
+```cpp
+bool isTransmitting() const noexcept;
+void printParameters();      // dumps current config & symbols
+```
+
+---
+
+## Demo
+
+The provided `main.cpp` shows a minimal example:
+
+1. Pipe-based signal handling to catch `SIGINT`/`SIGTERM`.
+2. Choose WSPR vs tone mode.
+3. Configure PPM manually via `setupTransmission()`.
+4. Spawn transmission with `enableTransmission()`.
+5. Wait on condition variable or spacebar before shutdown.
+
+Compile (as shown above) with:
+
+```bash
+cd src
+make debug
+sudo ./build/bin/wspr-transmitter_test
+```
+
+---
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE.md) for details.
+MIT — see [LICENSE.md](../LICENSE.md).
+
+---
+
+*2025 © Lee C. Bussy (@LBussy)*

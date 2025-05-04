@@ -239,6 +239,18 @@ public:
      */
     void printParameters();
 
+    /**
+     * @brief Determine if a frequency falls within any WSPR-15 band.
+     *
+     * @param freq  Frequency in Hz to test.
+     * @return `true` if `freq` lies strictly between the low and high edges
+     *         of any WSPR-15 range, `false` otherwise.
+     *
+     * @note The check is exclusive (`lo < freq < hi`). If you need inclusive
+     *       bounds, change to `lo <= freq && freq <= hi`.
+     */
+    bool inWspr15Band(double freq) noexcept;
+
 private:
     /**
      * @brief Invoked just before each transmission begins.
@@ -1152,9 +1164,9 @@ private:
         /// Start the scheduler thread
         void start()
         {
-            // if we already spawned a scheduler thread, clean it up first
+            // don’t spawn a second scheduler if one is already running
             if (thread_.joinable())
-                thread_.join();
+                return;
 
             stop_requested_.store(false, std::memory_order_release);
             thread_ = std::thread(&TransmissionScheduler::run, this);

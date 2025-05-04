@@ -66,6 +66,22 @@ constexpr const bool debug = false;
 // Helper classes and functions in anonymous namespace
 namespace
 {
+    /**
+     * @brief Standard frequency ranges for WSPR-15 operation.
+     *
+     * @details Defines the three well-known WSPR-15 band edges (in Hertz)
+     *          as lower/upper pairs.  These constants are used to select
+     *          WSPR-15 mode automatically when the transmit frequency
+     *          lies within one of these intervals:
+     *            - 137 600 – 137 625 Hz
+     *            - 475 800 – 475 825 Hz
+     *            - 1 838 200 – 1 838 225 Hz
+     */
+    static constexpr std::array<std::pair<double, double>, 3> WSPR15_RANGES{{
+        {137600, 137625},
+        {475800, 475825},
+        {1838200, 1838225},
+    }};
 
     /**
      * @brief Read a 4-byte big-endian integer from a device-tree file.
@@ -394,13 +410,10 @@ void WsprTransmitter::setupTransmission(
     // Choose WSPR mode and symbol timing
     int offset_freq = 0;
 
-    // We are not supporting WSPR-15
-    // if (!trans_params_.is_tone &&
-    //     ((trans_params_.frequency > 137600 && trans_params_.frequency < 137625) ||
-    //      (trans_params_.frequency > 475800 && trans_params_.frequency < 475825) ||
-    //      (trans_params_.frequency > 1838200 && trans_params_.frequency < 1838225)))
+    // We are not supporting WSPR-15, leaving this here for posterity
+    // if (!trans_params_.is_tone && inWspr15Band(trans_params_.frequency))
     // {
-    //     // WSPR‑15 mode
+    //     // WSPR-15 mode
     //     trans_params_.wspr_mode = WsprMode::WSPR15;
     //     trans_params_.symtime = 8.0 * WSPR_SYMTIME;
     //     if (trans_params_.use_offset)
@@ -515,7 +528,7 @@ void WsprTransmitter::enableTransmission()
     }
     else
     {
-        // scheduled WSPR window
+        // Scheduled WSPR window
         scheduler_.start();
     }
 }
@@ -649,6 +662,28 @@ void WsprTransmitter::printParameters()
     }
 }
 
+/**
+ * @brief Determine if a frequency falls within any WSPR-15 band.
+ *
+ * @param freq  Frequency in Hz to test.
+ * @return `true` if `freq` lies strictly between the low and high edges
+ *         of any WSPR-15 range, `false` otherwise.
+ *
+ * @note The check is exclusive (`lo < freq < hi`). If you need inclusive
+ *       bounds, change to `lo <= freq && freq <= hi`.
+ */
+bool WsprTransmitter::inWspr15Band(double freq) noexcept
+{
+    for (const auto &[lo, hi] : WSPR15_RANGES)
+    {
+        if (freq > lo && freq < hi)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Private Methods */
 
 /**
@@ -716,7 +751,7 @@ void WsprTransmitter::transmit()
     {
         if (debug)
         {
-            std::cerr << "transmit() aborted before start." << std::endl;
+            std::cerr << "WsprTransmitter::transmit(): transmit() aborted before start." << std::endl;
         }
         fire_end_cb("Transmission aborted before start.");
         return;
@@ -893,7 +928,7 @@ constexpr int WsprTransmitter::get_gpio_power_mw(int level)
 {
     if (level < 0 || level >= static_cast<int>(DRIVE_STRENGTH_TABLE.size()))
     {
-        throw std::out_of_range("Drive strength level must be between 0 and 7");
+        throw std::out_of_range("WsprTransmitter::get_gpio_power_mw: Drive strength level must be between 0 and 7");
     }
     return DRIVE_STRENGTH_TABLE[level];
 }
@@ -912,7 +947,7 @@ inline double WsprTransmitter::convert_mw_dbm(double mw)
 {
     if (mw <= 0.0)
     {
-        throw std::domain_error("Input power (mW) must be > 0 to compute logarithm");
+        throw std::domain_error("WsprTransmitter::convert_mw_dbm: Input power (mW) must be > 0 to compute logarithm");
     }
     return 10.0 * std::log10(mw);
 }
@@ -928,9 +963,22 @@ inline double WsprTransmitter::convert_mw_dbm(double mw)
  */
 void WsprTransmitter::thread_entry()
 {
-    // bump our own scheduling parameters first:
-    set_thread_priority();
-    // actually do the work (blocking until complete or stop_requested_)
+    // Bump our own scheduling parameters first:
+    try
+    {
+        set_thread_priority();
+    }
+    catch (const std::system_error &e)
+    {
+        throw std::domain_error(
+            std::string("WsprTransmitter::thread_entry(): Error setting thread priority: ") + e.what());
+    }
+    catch (const std::exception &e)
+    {
+        throw std::domain_error(
+            std::string("WsprTransmitter::thread_entry(): Unexpected error: ") + e.what());
+    }
+    // Actually do the work (blocking until complete or stop_requested_)
     transmit();
 }
 
@@ -939,7 +987,7 @@ void WsprTransmitter::thread_entry()
  *
  * @details Builds a sched_param struct using thread_priority_ and invokes
  *          pthread_setschedparam() with thread_policy_ on the current thread.
- *          If the call fails, writes a warning to stderr with the error message.
+ *          If the call fails, raise a warning.
  */
 void WsprTransmitter::set_thread_priority()
 {
@@ -947,10 +995,12 @@ void WsprTransmitter::set_thread_priority()
     sched_param sch{};
     sch.sched_priority = thread_priority_;
     int ret = pthread_setschedparam(pthread_self(), thread_policy_, &sch);
+
     if (ret != 0)
     {
-        std::cerr << "Warning: pthread_setschedparam failed: "
-                  << std::strerror(ret) << std::endl;
+        throw std::runtime_error(
+            std::string("WsprTransmitter::set_thread_priority(): pthread_setschedparam failed: ") +
+            std::strerror(ret));
     }
 }
 
@@ -1352,7 +1402,7 @@ void WsprTransmitter::transmit_symbol(
     const int f1_idx = f0_idx + 1;
 
     if (debug)
-        std::cout << "DEBUG: <instructions_[bufPtr] begin=0x"
+        std::cout << "DEBUG: <instructions_[bufPtr] begin = 0x"
                   << std::hex
                   << reinterpret_cast<unsigned long>(&instructions_[bufPtr])
                   << std::dec << ">" << std::endl;
@@ -1480,7 +1530,7 @@ void WsprTransmitter::transmit_symbol(
     }
     // Final debug
     if (debug)
-        std::cout << "DEBUG: <instructions_[bufPtr]=0x"
+        std::cout << "DEBUG: <instructions_[bufPtr] = 0x"
                   << std::hex
                   << reinterpret_cast<unsigned long>(instructions_[bufPtr].v)
                   << " 0x"
