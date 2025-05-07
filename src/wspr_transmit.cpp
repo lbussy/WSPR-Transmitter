@@ -542,13 +542,18 @@ void WsprTransmitter::enableTransmission()
  */
 void WsprTransmitter::disableTransmission()
 {
-    // Atop scheduling further windows
+    // Stop scheduling further windows
     scheduler_.stop();
+
     // if a transmit thread is running, signal & join it too
     stop_requested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
-    if (tx_thread_.joinable())
+
+    if (tx_thread_.joinable() &&
+        tx_thread_.get_id() != std::this_thread::get_id())
+    {
         tx_thread_.join();
+    }
 }
 
 /**
@@ -699,7 +704,10 @@ inline void WsprTransmitter::fire_start_cb(const std::string &msg)
 {
     if (on_transmit_start_)
     {
-        on_transmit_start_(std::string{});
+        // Launch callback on a detached thread:
+        std::thread([cb = on_transmit_start_, msg]()
+                    { cb(msg); })
+            .detach();
     }
 }
 
@@ -716,7 +724,10 @@ inline void WsprTransmitter::fire_end_cb(const std::string &msg)
 {
     if (on_transmit_end_)
     {
-        on_transmit_end_(msg);
+        // Launch callback on a detached thread:
+        std::thread([cb = on_transmit_end_, msg]()
+                    { cb(msg); })
+            .detach();
     }
 }
 
@@ -743,7 +754,7 @@ void WsprTransmitter::transmit()
         {
             std::cerr << "[DEBUG WsprTransmitter] transmit() Skipping transmission (frequency = 0.0.)" << std::endl;
         }
-        fire_end_cb("Skipping transmission (frequency = 0.0.)");
+        fire_end_cb("Skipping transmission (frequency = 0.0).");
         return;
     }
 

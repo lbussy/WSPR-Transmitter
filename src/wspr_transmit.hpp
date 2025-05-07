@@ -1177,8 +1177,13 @@ private:
         {
             stop_requested_.store(true, std::memory_order_release);
             cv_.notify_all();
-            if (thread_.joinable())
+
+            // Only join if it's a different thread than the one calling stop()
+            if (thread_.joinable() &&
+                thread_.get_id() != std::this_thread::get_id())
+            {
                 thread_.join();
+            }
         }
 
     private:
