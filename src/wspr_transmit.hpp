@@ -28,6 +28,7 @@
 #define _WSPR_TRANSMIT_HPP
 
 #include "wspr_message.hpp"
+#include "mailbox.hpp"
 
 #include <array>              // std::array
 #include <atomic>             // std::atomic
@@ -681,34 +682,31 @@ private:
     struct DMAConfig dma_config_;
 
     /**
-     * @brief Global mailbox structure for Broadcom mailbox communication.
+     * @struct MailboxState
+     * @brief Encapsulates all mailbox‐related state needed for DMA memory operations.
      *
-     * This static structure stores information related to the Broadcom mailbox interface,
-     * which is used for allocating, locking, and mapping physical memory for DMA operations.
-     * It is declared as a file-scope static variable so that exit handlers and other parts
-     * of the program can access its members.
+     * This structure is used by WsprTransmitter to manage a pool of DMA‐capable pages
+     * via the Broadcom mailbox interface. It tracks:
+     *   - The mailbox file descriptor (opened with mbox_open()),
+     *   - The memory reference ID returned by mem_alloc(),
+     *   - The bus address returned by mem_lock(),
+     *   - The CPU‐accessible pointer to the mmap’d region,
+     *   - An RAII object to automatically unmap on teardown,
+     *   - How many pages were allocated and how many have been handed out.
      *
-     * @var mailbox_::handle
-     *      Mailbox handle obtained from mbox_open(), used for communication with the mailbox.
-     * @var mailbox_::mem_ref
-     *      Memory reference returned by mem_alloc(), identifying the allocated memory block.
-     * @var mailbox_::bus_addr
-     *      Bus address of the allocated memory, obtained from mem_lock().
-     * @var mailbox_::virt_addr
-     *      Virtual address mapped to the allocated physical memory via mapmem().
-     * @var mailbox_::pool_size
-     *      The total number of memory pages allocated in the pool.
-     * @var mailbox_::pool_cnt
-     *      The count of memory pages that have been allocated from the pool so far.
+     * In other words, once you call mem_alloc() → mem_lock() → mapmem() these fields
+     * will hold all of the information needed to hand out page‐sized chunks, and then
+     * later to unmap, unlock, and free the entire block.
      */
-    struct Mailbox
+    struct MailboxState
     {
-        int handle = -1;       ///< mailbox fd
-        unsigned mem_ref = 0;  ///< mem_alloc()
-        unsigned bus_addr = 0; ///< mem_lock()
-        unsigned char *virt_addr = nullptr;
-        unsigned pool_size = 0; ///< total DMA pages
-        unsigned pool_cnt = 0;  ///< pages handed out
+        int handle = -1;                    ///< Mailbox file descriptor from mbox_open().
+        unsigned mem_ref = 0;               ///< Reference ID returned by mem_alloc().
+        unsigned bus_addr = 0;              ///< Bus address returned by mem_lock().
+        unsigned char *virt_addr = nullptr; ///< CPU‐accessible pointer to the mapped block.
+        MappedRegion region_{nullptr, 0};   ///< RAII wrapper for the mmap’ed region.
+        unsigned pool_size = 0;             ///< Total number of DMA pages allocated.
+        unsigned pool_cnt = 0;              ///< Number of pages already handed out.
     };
 
     /**
@@ -719,7 +717,7 @@ private:
      * the virtual address pointer (from mapmem()), and the pool parameters
      * for page allocation.
      */
-    Mailbox mailbox_;
+    MailboxState mailbox_;
 
     /**
      * @brief Control Block (CB) structure for DMA engine commands.
@@ -1073,15 +1071,6 @@ private:
      *          If opening the mailbox fails, an error message is printed, and the program exits.
      */
     void open_mbox();
-
-    /**
-     * @brief Safely removes a file if it exists.
-     * @details Checks whether the specified file exists before attempting to remove it.
-     *          If the file exists but removal fails, a warning is displayed.
-     *
-     * @param[in] filename Pointer to a null-terminated string containing the file path.
-     */
-    void safe_remove();
 
     /**
      * @brief Configures and initializes DMA for PWM signal generation.
