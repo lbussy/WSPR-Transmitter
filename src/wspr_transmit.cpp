@@ -25,13 +25,8 @@
  */
 
 #include "wspr_transmit.hpp" // Class Declarations
-
-#include "wspr_message.hpp" // WsprMessage Submodule
-
-extern "C"
-{
-#include "mailbox.h" // Broadcom Mailbox Submodule
-}
+#include "wspr_message.hpp"  // WsprMessage Submodule
+#include "mailbox.hpp"
 
 // C++ Standard Library Headers
 #include <algorithm> // std::copy_n, std::clamp
@@ -171,7 +166,7 @@ namespace
 
     public:
         /** @throws std::runtime_error if `mbox_open()` returns < 0. */
-        MailboxHandle() : fd_(mbox_open())
+        MailboxHandle() : fd_(mailbox.mbox_open())
         {
             if (fd_ < 0)
                 throw std::runtime_error("MailboxHandle: mbox_open failed");
@@ -180,7 +175,7 @@ namespace
         ~MailboxHandle()
         {
             if (fd_ >= 0)
-                mbox_close(fd_);
+                mailbox.mbox_close(fd_);
         }
 
         /** @return The mailbox file descriptor. */
@@ -237,36 +232,44 @@ namespace
         unsigned char *virt_addr_;
 
     public:
-        /**
-         * @param mbox_fd   Open mailbox descriptor.
-         * @param numpages  Number of pages to allocate (1 const + N instr).
-         * @param mem_flag  The mailbox allocation flag from `dma_config_.mem_flag`.
-         */
         MailboxMemoryPool(int mbox_fd, unsigned numpages, uint32_t mem_flag)
             : mbox_fd_(mbox_fd),
               total_size_(numpages * kPageSize),
-              mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
+              mem_ref_(0),
+              bus_addr_(0),
+              virt_addr_(nullptr)
         {
-            // Allocate
-            mem_ref_ = mem_alloc(mbox_fd_, total_size_, kBlockSize, mem_flag);
+            // Allocate via mailbox
+            mem_ref_ = mailbox.mem_alloc(mbox_fd_, total_size_, kBlockSize, mem_flag);
             if (!mem_ref_)
+            {
                 throw std::runtime_error("MailboxMemoryPool: mem_alloc failed");
-            // Lock
-            bus_addr_ = mem_lock(mbox_fd_, mem_ref_);
+            }
+
+            // Lock it to get a bus address
+            bus_addr_ = mailbox.mem_lock(mbox_fd_, mem_ref_);
             if (!bus_addr_)
             {
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mbox_fd_, mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mem_lock failed");
             }
-            // Map
-            auto phys = static_cast<off_t>(bus_addr_ & ~0xC0000000UL);
-            virt_addr_ = static_cast<unsigned char *>(mapmem(phys, total_size_));
-            if (!virt_addr_)
+
+            // Map into our address space
+            off_t phys = static_cast<off_t>(bus_addr_ & ~0xC0000000UL);
+            region_ = mailbox.mapmem(
+                static_cast<uint32_t>(phys),
+                total_size_);
+            void *raw_ptr = region_.get();
+            if (!raw_ptr)
             {
-                mem_unlock(mbox_fd_, mem_ref_);
-                mem_free(mbox_fd_, mem_ref_);
+                // On failure, undo the lock + free before throwing
+                mailbox.mem_unlock(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mbox_fd_, mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mapmem failed");
             }
+
+            // Save the “usable” byte pointer
+            virt_addr_ = static_cast<unsigned char *>(raw_ptr);
         }
 
         /** Unmap, unlock, and free on destruction. */
@@ -274,12 +277,12 @@ namespace
         {
             if (virt_addr_)
             {
-                unmapmem(virt_addr_, total_size_);
+                mailbox.unmapmem(virt_addr_, total_size_);
             }
             if (bus_addr_)
             {
-                mem_unlock(mbox_fd_, mem_ref_);
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_unlock(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mbox_fd_, mem_ref_);
             }
         }
 
@@ -289,6 +292,9 @@ namespace
         unsigned bus() const { return bus_addr_; }
         /** @return Total size of the mapped region, in bytes. */
         size_t size() const { return total_size_; }
+
+    private:
+        MappedRegion region_{nullptr, 0};
     };
 
 } // end anonymous namespace
@@ -911,19 +917,16 @@ void WsprTransmitter::dma_cleanup()
     // Deallocate mailbox-allocated memory pages
     deallocate_memory_pool();
 
-    // Close mailbox handle if open
+    // Close mailbox handle if open (only once):
     if (mailbox_.handle >= 0)
     {
-        mbox_close(mailbox_.handle);
+        mailbox.mbox_close(mailbox_.handle);
         mailbox_.handle = -1;
     }
 
-    // Remove the local device file if it exists
-    safe_remove();
-
     // Reset global configuration structures to defaults
-    dma_config_ = DMAConfig(); // Uses your in-class initializers
-    mailbox_ = Mailbox();      // Uses your in-class initializers
+    dma_config_ = DMAConfig();
+    mailbox_.handle = -1; // we’ve already closed it, so just reset the integer
 }
 
 /**
@@ -1207,7 +1210,7 @@ void WsprTransmitter::get_plld_and_memflag()
 void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 {
     // Allocate a contiguous block of physical pages
-    mailbox_.mem_ref = mem_alloc(
+    mailbox_.mem_ref = mailbox.mem_alloc(
         mailbox_.handle,
         PAGE_SIZE * numpages,
         BLOCK_SIZE,
@@ -1218,20 +1221,32 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     }
 
     // Lock the block to obtain its bus address
-    mailbox_.bus_addr = mem_lock(mailbox_.handle, mailbox_.mem_ref);
+    mailbox_.bus_addr = mailbox.mem_lock(mailbox_.handle, mailbox_.mem_ref);
     if (mailbox_.bus_addr == 0)
     {
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_free(mailbox_.handle, mailbox_.mem_ref);
         throw std::runtime_error("Error: mem_lock failed.");
     }
 
-    // Map the locked pages into user‑space virtual memory
-    mailbox_.virt_addr = static_cast<unsigned char *>(
-        mapmem(bus_to_physical(mailbox_.bus_addr), PAGE_SIZE * numpages));
+    // ────────────────────────────────────────────────────────────────────
+    // Since mailbox.mapmem(...) returns a Mailbox::MappedRegion object,
+    // we must store that MappedRegion into mailbox_.region_, then call .get()
+    // ────────────────────────────────────────────────────────────────────
+
+    // Call mapmem(...) and store the RAII wrapper in mailbox_.region_:
+    mailbox_.region_ = mailbox.mapmem(
+        static_cast<uint32_t>(bus_to_physical(mailbox_.bus_addr)),
+        PAGE_SIZE * numpages);
+
+    // Extract the raw void* from the MappedRegion:
+    void *raw_ptr = mailbox_.region_.get();
+    mailbox_.virt_addr = static_cast<unsigned char *>(raw_ptr);
+
+    // If it failed, undo lock/free and throw
     if (mailbox_.virt_addr == nullptr)
     {
-        mem_unlock(mailbox_.handle, mailbox_.mem_ref);
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_unlock(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_free(mailbox_.handle, mailbox_.mem_ref);
         throw std::runtime_error("Error: mapmem failed.");
     }
 
@@ -1296,15 +1311,15 @@ void WsprTransmitter::deallocate_memory_pool()
     // Free virtual memory mapping if it was allocated.
     if (mailbox_.virt_addr != nullptr)
     {
-        unmapmem(mailbox_.virt_addr, mailbox_.pool_size * PAGE_SIZE);
+        mailbox.unmapmem(mailbox_.virt_addr, mailbox_.pool_size * PAGE_SIZE);
         mailbox_.virt_addr = nullptr; // Prevent dangling pointer usage
     }
 
     // Free the allocated memory block if it was successfully allocated.
     if (mailbox_.mem_ref != 0)
     {
-        mem_unlock(mailbox_.handle, mailbox_.mem_ref);
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_unlock(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_free(mailbox_.handle, mailbox_.mem_ref);
         mailbox_.mem_ref = 0; // Ensure it does not reference a freed block
     }
 
@@ -1598,35 +1613,12 @@ double WsprTransmitter::bit_trunc(const double &d, const int &lsb)
 void WsprTransmitter::open_mbox()
 {
     // Attempt to open the mailbox
-    mailbox_.handle = mbox_open();
+    mailbox_.handle = mailbox.mbox_open();
 
     // Check for failure and handle the error
     if (mailbox_.handle < 0)
     {
         throw std::runtime_error("Error: Failed to open mailbox.");
-    }
-}
-
-/**
- * @brief Safely removes a file if it exists.
- * @details Checks whether the specified file exists before attempting to remove it.
- *          If the file exists but removal fails, a warning is displayed.
- *
- * @param[in] filename Pointer to a null-terminated string containing the file path.
- */
-void WsprTransmitter::safe_remove()
-{
-    const char *filename = LOCAL_DEVICE_FILE_NAME;
-    struct stat buffer;
-
-    // Check if the file exists before attempting to remove it
-    if (stat(filename, &buffer) == 0)
-    {
-        // Attempt to remove the file
-        if (unlink(filename) != 0)
-        {
-            std::cerr << "Warning: Failed to remove " << filename << std::endl;
-        }
     }
 }
 
