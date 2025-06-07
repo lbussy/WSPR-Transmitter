@@ -330,7 +330,6 @@ WsprTransmitter::~WsprTransmitter()
 {
     // Stop scheduling new windows and any current TX
     disableTransmission(); // Stops scheduler + joins any tx_thread_
-    dma_cleanup();         // In case anything still mapped
 }
 
 /**
@@ -393,7 +392,6 @@ void WsprTransmitter::setupTransmission(
         stopTransmission();        // tell the worker to stop
         if (tx_thread_.joinable()) // wait for it to actually exit
             tx_thread_.join();
-        dma_cleanup(); // now unmap/free everything
     }
 
     // Clear the stop flag so the next thread can run
@@ -591,7 +589,6 @@ void WsprTransmitter::stopTransmission()
 void WsprTransmitter::shutdownTransmitter()
 {
     disableTransmission(); // stops scheduler, signals & joins tx_thread_
-    dma_cleanup();         // unmaps peripherals, frees mailbox memory
 }
 
 /**
@@ -862,76 +859,6 @@ void WsprTransmitter::join_transmission()
     {
         tx_thread_.join();
     }
-}
-
-/**
- * @brief Clean up DMA and mailbox resources.
- *
- * @details Performs teardown in the following order:
- *   1. Prevent multiple invocations.
- *   2. Stop any ongoing DMA transfers and disable the PWM clock.
- *   3. Restore saved clock and PWM register values.
- *   4. Reset the DMA controller.
- *   5. Unmap the peripheral base address region.
- *   6. Deallocate mailbox memory pages.
- *   7. Close the mailbox handle.
- *   8. Remove the local device file.
- *   9. Reset all configuration data to defaults.
- *
- * @note This function is idempotent; subsequent calls are no‑ops.
- */
-void WsprTransmitter::dma_cleanup()
-{
-    // Only clean up if we have something to tear down
-    if (!dma_setup_done_)
-    {
-        return;
-    }
-    dma_setup_done_ = false;
-
-    // If we never mapped the peripherals, nothing to tear down:
-    if (!dma_config_.peripheral_base_virtual)
-    {
-        return;
-    }
-
-    // Stop DMA transfers and disable PWM clock
-    transmit_off();
-
-    // Restore original clock and PWM registers
-    access_bus_address(CM_GP0DIV_BUS) = dma_config_.orig_gp0div;
-    access_bus_address(CM_GP0CTL_BUS) = dma_config_.orig_gp0ctl;
-    access_bus_address(PWM_BUS_BASE + 0x00) = dma_config_.orig_pwm_ctl;
-    access_bus_address(PWM_BUS_BASE + 0x04) = dma_config_.orig_pwm_sta;
-    access_bus_address(PWM_BUS_BASE + 0x10) = dma_config_.orig_pwm_rng1;
-    access_bus_address(PWM_BUS_BASE + 0x20) = dma_config_.orig_pwm_rng2;
-    access_bus_address(PWM_BUS_BASE + 0x08) = dma_config_.orig_pwm_fifocfg;
-
-    // Reset DMA controller registers
-    clear_dma_setup();
-
-    // Unmap peripheral region if mapped
-    if (dma_config_.peripheral_base_virtual)
-    {
-        munmap(dma_config_.peripheral_base_virtual,
-               dma_config_.peripheral_map_size);
-        dma_config_.peripheral_base_virtual = nullptr;
-        dma_config_.peripheral_map_size = 0;
-    }
-
-    // Deallocate mailbox-allocated memory pages
-    deallocate_memory_pool();
-
-    // Close mailbox handle if open (only once):
-    if (mailbox_.handle >= 0)
-    {
-        mailbox.mbox_close(mailbox_.handle);
-        mailbox_.handle = -1;
-    }
-
-    // Reset global configuration structures to defaults
-    dma_config_ = DMAConfig();
-    mailbox_.handle = -1; // we’ve already closed it, so just reset the integer
 }
 
 /**
@@ -1775,16 +1702,34 @@ void WsprTransmitter::setup_dma()
     dma_config_.orig_pwm_rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
     dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
 
-    // 4) open mailbox & pool
-    MailboxHandle mbox;
-    mailbox_.handle = mbox.get();
-    mbox.release();
+    // 4) open mailbox only if not already open
+    if (debug)
+    {
+        if (mailbox_.handle >= 0)
+        {
+            std::cout << "[DEBUG WsprTransmitter] setup_dma(): Reusing existing mailbox handle: "
+                      << mailbox_.handle << std::endl;
+        }
+        else
+        {
+            std::cout << "[DEBUG WsprTransmitter] setup_dma(): Opening new mailbox handle" << std::endl;
+        }
+    }
+
+    if (mailbox_.handle < 0)
+    {
+        MailboxHandle mbox;
+        mailbox_.handle = mbox.get();
+        mbox.release();
+    }
+
+    // 5) allocate memory via mailbox
     MailboxMemoryPool pool(mailbox_.handle, /*numpages=*/1025, dma_config_.mem_flag);
 
-    // 5) build DMA pages (old signature)
+    // 6) build DMA pages
     create_dma_pages(const_page_, instr_page_, instructions_);
 
-    // 6) done
+    // 7) done
     dma_setup_done_ = true;
 }
 

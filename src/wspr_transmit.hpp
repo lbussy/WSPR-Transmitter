@@ -874,24 +874,6 @@ private:
     void join_transmission();
 
     /**
-     * @brief Clean up DMA and mailbox resources.
-     *
-     * @details Performs teardown in the following order:
-     *   1. Prevent multiple invocations.
-     *   2. Stop any ongoing DMA transfers and disable the PWM clock.
-     *   3. Restore saved clock and PWM register values.
-     *   4. Reset the DMA controller.
-     *   5. Unmap the peripheral base address region.
-     *   6. Deallocate mailbox memory pages.
-     *   7. Close the mailbox handle.
-     *   8. Remove the local device file.
-     *   9. Reset all configuration data to defaults.
-     *
-     * @note This function is idempotent; subsequent calls are no‑ops.
-     */
-    void dma_cleanup();
-
-    /**
      * @brief Get the GPIO drive strength in milliamps.
      *
      * Maps a drive strength level (0–7) to its corresponding current drive
