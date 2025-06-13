@@ -332,11 +332,15 @@ WsprTransmitter::~WsprTransmitter()
  *
  * @param[in] start_cb
  *   Called on the transmit thread immediately before the first symbol
- *   (or tone) is emitted.  If null, no start notification is made.
+ *   (or tone) is emitted. If null, no start notification is made.
+ *   The callback receives a std::variant containing either a double
+ *   (transmit frequency) or a std::string (custom message).
+ *
  * @param[in] end_cb
  *   Called on the transmit thread immediately after the last WSPR
- *   symbol is sent (but before DMA/PWM are torn down).  If null,
+ *   symbol is sent (but before DMA/PWM are torn down). If null,
  *   no completion notification is made.
+ *   The callback uses the same variant format as the start callback.
  */
 void WsprTransmitter::setTransmissionCallbacks(Callback start_cb,
                                                Callback end_cb)
@@ -700,13 +704,13 @@ bool WsprTransmitter::inWspr15Band(double freq) noexcept
  *
  * @param cb  The callback to invoke just before starting transmission.
  */
-inline void WsprTransmitter::fire_start_cb(const std::string &msg)
+inline void WsprTransmitter::fire_start_cb(const double frequency)
 {
     if (on_transmit_start_)
     {
         // Launch callback on a detached thread:
-        std::thread([cb = on_transmit_start_, msg]()
-                    { cb(msg); })
+        std::thread([cb = on_transmit_start_, frequency]()
+                    { cb(frequency); })
             .detach();
     }
 }
@@ -794,8 +798,8 @@ void WsprTransmitter::transmit()
     }
     else
     {
-        /// Do callback if set
-        fire_start_cb();
+        // Fire callback with frequency as an argument
+        fire_start_cb(trans_params_.frequency);
         // Transmit each symbol in the WSPR message
         const int symbol_count =
             static_cast<int>(trans_params_.symbols.size());

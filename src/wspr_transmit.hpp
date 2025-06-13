@@ -31,14 +31,14 @@
 
 #include <array>              // std::array
 #include <atomic>             // std::atomic
+#include <chrono>             // std::chrono in TransmissionScheduler
 #include <condition_variable> // std::condition_variable
 #include <functional>         // std::function
 #include <mutex>              // std::mutex
 #include <string>             // std::string
 #include <thread>             // std::thread
+#include <variant>            // std::variant
 #include <vector>             // std::vector
-#include <chrono>             // std::chrono in TransmissionScheduler
-#include <ctime>              // std::time_t, std::tm, std::mktime
 
 /**
  * @enum WsprMode
@@ -102,9 +102,16 @@ public:
 
     /**
      * @brief Signature for user-provided transmission callbacks.
-     * @param msg  A message string you may choose to ignore.
+     *
+     * This callback receives either a message string or a frequency value,
+     * allowing the user to handle both human-readable messages and numeric data.
+     *
+     * @param arg A variant containing either a std::string or a double value.
+     *            The string may carry a descriptive message, while the double
+     *            represents a frequency in Hz (or another unit depending on context).
      */
-    using Callback = std::function<void(const std::string &msg)>;
+    using CallbackArg = std::variant<std::string, double>;
+    using Callback = std::function<void(const CallbackArg &)>;
 
     /**
      * @brief Install optional callbacks for transmission start/end.
@@ -826,9 +833,9 @@ private:
      *          calls it with an empty message string to satisfy the
      *          `Callback` signature.
      *
-     * @param msg  A string message to pass into the callback.
+     * @param frequency  A double frequency to pass into the callback.
      */
-    void fire_start_cb(const std::string &msg = {});
+    void fire_start_cb(const double frequency);
 
     /**
      * @brief Safely invoke the user’s end‐transmission callback with a message.
