@@ -41,20 +41,6 @@
 #include <vector>             // std::vector
 
 /**
- * @enum WsprMode
- * @brief Specifies the WSPR mode for the frequency.
- *
- * This enumeration defines the available modes for operation.
- * - `WSPR2`: Indicates a standard (2-minute) transmission.
- * - `WSPR15`: Indicates a slow (15-minute) transmission.
- */
-enum class WsprMode
-{
-    WSPR2, ///< WSPR transmission mode
-    WSPR15 ///< Test tone generation mode
-};
-
-/**
  * @class WsprTransmitter
  * @brief Encapsulates configuration and DMA‑driven transmission of WSPR signals.
  *
@@ -246,18 +232,6 @@ public:
      */
     void printParameters();
 
-    /**
-     * @brief Determine if a frequency falls within any WSPR-15 band.
-     *
-     * @param freq  Frequency in Hz to test.
-     * @return `true` if `freq` lies strictly between the low and high edges
-     *         of any WSPR-15 range, `false` otherwise.
-     *
-     * @note The check is exclusive (`lo < freq < hi`). If you need inclusive
-     *       bounds, change to `lo <= freq && freq <= hi`.
-     */
-    bool inWspr15Band(double freq) noexcept;
-
 private:
     /**
      * @brief Invoked just before each transmission begins.
@@ -398,22 +372,6 @@ private:
      * @see WSPR15_RAND_OFFSET
      */
     static constexpr int WSPR_RAND_OFFSET = 80;
-
-    /**
-     * @brief Random frequency offset for WSPR-15 transmissions.
-     *
-     * This constant defines the range, in Hertz, for random frequency offsets
-     * applied to WSPR-15 transmissions. The offset is applied symmetrically
-     * around the target frequency, resulting in a random variation of ±8 Hz.
-     *
-     * This ensures that WSPR-15 transmissions remain within the allocated band
-     * while introducing slight variations to minimize signal collisions.
-     *
-     * @note This offset is specific to WSPR-15 transmissions (15-minute cycles).
-     *
-     * @see WSPR_RAND_OFFSET
-     */
-    static constexpr int WSPR15_RAND_OFFSET = 8;
 
     /**
      * @brief Nominal symbol duration for WSPR transmissions.
@@ -597,7 +555,6 @@ private:
         double ppm;                         ///< Current system PPM adjustment
         bool is_tone;                       ///< Is test tone
         int power;                          ///< GPIO power level 0-7
-        WsprMode wspr_mode;                 ///< WSPR mode for the frequency.
         double symtime;                     ///< Duration of each symbol in seconds.
         double tone_spacing;                ///< Frequency spacing between adjacent tones in Hz.
         std::vector<double> dma_table_freq; ///< DMA frequency lookup table.
@@ -613,7 +570,6 @@ private:
               frequency(0.0),
               is_tone(false),
               power(0),
-              wspr_mode(WsprMode::WSPR2),
               symtime(0.0),
               tone_spacing(0.0),
               dma_table_freq(1024, 0.0),
@@ -695,20 +651,20 @@ private:
      * It is declared as a file-scope static variable so that exit handlers and other parts
      * of the program can access its members.
      *
-     * @var mailbox_::handle
-     *      Mailbox handle obtained from mbox_open(), used for communication with the mailbox.
-     * @var mailbox_::mem_ref
+     * @var mailbox_struct_::handle
+     *      MailboxStruct handle obtained from mbox_open(), used for communication with the mailbox.
+     * @var mailbox_struct_::mem_ref
      *      Memory reference returned by mem_alloc(), identifying the allocated memory block.
-     * @var mailbox_::bus_addr
+     * @var mailbox_struct_::bus_addr
      *      Bus address of the allocated memory, obtained from mem_lock().
-     * @var mailbox_::virt_addr
+     * @var mailbox_struct_::virt_addr
      *      Virtual address mapped to the allocated physical memory via mapmem().
-     * @var mailbox_::pool_size
+     * @var mailbox_struct_::pool_size
      *      The total number of memory pages allocated in the pool.
-     * @var mailbox_::pool_cnt
+     * @var mailbox_struct_::pool_cnt
      *      The count of memory pages that have been allocated from the pool so far.
      */
-    struct Mailbox
+    struct MailboxStruct
     {
         int handle = -1;       ///< mailbox fd
         unsigned mem_ref = 0;  ///< mem_alloc()
@@ -719,14 +675,14 @@ private:
     };
 
     /**
-     * @brief Mailbox state for DMA memory management.
+     * @brief MailboxStruct state for DMA memory management.
      *
      * This member holds the mailbox handle (from mbox_open()), the memory
      * reference ID (from mem_alloc()), the bus address (from mem_lock()),
      * the virtual address pointer (from mapmem()), and the pool parameters
      * for page allocation.
      */
-    Mailbox mailbox_;
+    MailboxStruct mailbox_struct_;
 
     /**
      * @brief Control Block (CB) structure for DMA engine commands.
@@ -1082,15 +1038,6 @@ private:
     void open_mbox();
 
     /**
-     * @brief Safely removes a file if it exists.
-     * @details Checks whether the specified file exists before attempting to remove it.
-     *          If the file exists but removal fails, a warning is displayed.
-     *
-     * @param[in] filename Pointer to a null-terminated string containing the file path.
-     */
-    void safe_remove();
-
-    /**
      * @brief Configures and initializes DMA for PWM signal generation.
      * @details Allocates memory pages, creates DMA control blocks, sets up a
      *          circular inked list of DMA instructions, and configures the
@@ -1209,10 +1156,8 @@ private:
             auto now = system_clock::now();
             auto secs = duration_cast<seconds>(now.time_since_epoch()).count();
 
-            // Choose cycle length: 2 min = 120 s or 15 min = 900 s
-            const int cycle = (parent_->trans_params_.wspr_mode == WsprMode::WSPR15)
-                                  ? 15 * 60
-                                  : 2 * 60;
+            // Choose cycle length: 2 min = 120 s
+            const int cycle = 2 * 60;
 
             // Integer‐divide to find current cycle index
             auto idx = secs / cycle;

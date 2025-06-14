@@ -28,10 +28,7 @@
 
 #include "wspr_message.hpp" // WsprMessage Submodule
 
-extern "C"
-{
-#include "mailbox.h" // Broadcom Mailbox Submodule
-}
+#include "mailbox.hpp" // Broadcom Mailbox Submodule
 
 // C++ Standard Library Headers
 #include <algorithm> // std::copy_n, std::clamp
@@ -66,23 +63,6 @@ constexpr const bool debug = false;
 // Helper classes and functions in anonymous namespace
 namespace
 {
-    /**
-     * @brief Standard frequency ranges for WSPR-15 operation.
-     *
-     * @details Defines the three well-known WSPR-15 band edges (in Hertz)
-     *          as lower/upper pairs.  These constants are used to select
-     *          WSPR-15 mode automatically when the transmit frequency
-     *          lies within one of these intervals:
-     *            - 137 600 – 137 625 Hz
-     *            - 475 800 – 475 825 Hz
-     *            - 1 838 200 – 1 838 225 Hz
-     */
-    static constexpr std::array<std::pair<double, double>, 3> WSPR15_RANGES{{
-        {137600, 137625},
-        {475800, 475825},
-        {1838200, 1838225},
-    }};
-
     /**
      * @brief Read a 4-byte big-endian integer from a device-tree file.
      *
@@ -171,7 +151,7 @@ namespace
 
     public:
         /** @throws std::runtime_error if `mbox_open()` returns < 0. */
-        MailboxHandle() : fd_(mbox_open())
+        MailboxHandle() : fd_(mailbox.mbox_open())
         {
             if (fd_ < 0)
                 throw std::runtime_error("MailboxHandle: mbox_open failed");
@@ -180,7 +160,7 @@ namespace
         ~MailboxHandle()
         {
             if (fd_ >= 0)
-                mbox_close(fd_);
+                mailbox.mbox_close(fd_);
         }
 
         /** @return The mailbox file descriptor. */
@@ -189,7 +169,7 @@ namespace
         /**
          * @brief Release ownership so the destructor won’t close.
          *
-         * Use after transferring `fd_` to `mailbox_.handle`.
+         * Use after transferring `fd_` to `mailbox_struct_.handle`.
          */
         void release() { fd_ = -1; }
     };
@@ -248,23 +228,23 @@ namespace
               mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
         {
             // Allocate
-            mem_ref_ = mem_alloc(mbox_fd_, total_size_, kBlockSize, mem_flag);
+            mem_ref_ = mailbox.mem_alloc(mbox_fd_, total_size_, kBlockSize, mem_flag);
             if (!mem_ref_)
                 throw std::runtime_error("MailboxMemoryPool: mem_alloc failed");
             // Lock
-            bus_addr_ = mem_lock(mbox_fd_, mem_ref_);
+            bus_addr_ = mailbox.mem_lock(mbox_fd_, mem_ref_);
             if (!bus_addr_)
             {
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mbox_fd_, mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mem_lock failed");
             }
             // Map
             auto phys = static_cast<off_t>(bus_addr_ & ~0xC0000000UL);
-            virt_addr_ = static_cast<unsigned char *>(mapmem(phys, total_size_));
+            virt_addr_ = static_cast<unsigned char *>(mailbox.mapmem(phys, total_size_));
             if (!virt_addr_)
             {
-                mem_unlock(mbox_fd_, mem_ref_);
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_unlock(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mbox_fd_, mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mapmem failed");
             }
         }
@@ -274,12 +254,12 @@ namespace
         {
             if (virt_addr_)
             {
-                unmapmem(virt_addr_, total_size_);
+                mailbox.unmapmem(virt_addr_, total_size_);
             }
             if (bus_addr_)
             {
-                mem_unlock(mbox_fd_, mem_ref_);
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_unlock(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mbox_fd_, mem_ref_);
             }
         }
 
@@ -414,23 +394,10 @@ void WsprTransmitter::setupTransmission(
     // Choose WSPR mode and symbol timing
     int offset_freq = 0;
 
-    // We are not supporting WSPR-15, leaving this here for posterity
-    // if (!trans_params_.is_tone && inWspr15Band(trans_params_.frequency))
-    // {
-    //     // WSPR-15 mode
-    //     trans_params_.wspr_mode = WsprMode::WSPR15;
-    //     trans_params_.symtime = 8.0 * WSPR_SYMTIME;
-    //     if (trans_params_.use_offset)
-    //         offset_freq = WSPR15_RAND_OFFSET;
-    // }
-    // else
-    {
-        // WSPR‑2 mode
-        trans_params_.wspr_mode = WsprMode::WSPR2;
-        trans_params_.symtime = WSPR_SYMTIME;
-        if (trans_params_.use_offset)
-            offset_freq = WSPR_RAND_OFFSET;
-    }
+    // WSPR‑2 mode
+    trans_params_.symtime = WSPR_SYMTIME;
+    if (trans_params_.use_offset)
+        offset_freq = WSPR_RAND_OFFSET;
     trans_params_.tone_spacing = 1.0 / trans_params_.symtime;
 
     // Apply random offset if requested
@@ -629,9 +596,6 @@ void WsprTransmitter::printParameters()
               << std::fixed << std::setprecision(1)
               << convert_mw_dbm(get_gpio_power_mw(trans_params_.power)) << " dBm" << std::endl;
 
-    std::cout << "WSPR Mode:         "
-              << (trans_params_.is_tone ? "N/A" : (trans_params_.wspr_mode == WsprMode::WSPR2 ? "WSPR-2" : "WSPR-15")) << std::endl;
-
     std::cout << "Test Tone:         "
               << (trans_params_.is_tone ? "True" : "False") << std::endl;
 
@@ -670,28 +634,6 @@ void WsprTransmitter::printParameters()
         }
         std::cout << std::endl;
     }
-}
-
-/**
- * @brief Determine if a frequency falls within any WSPR-15 band.
- *
- * @param freq  Frequency in Hz to test.
- * @return `true` if `freq` lies strictly between the low and high edges
- *         of any WSPR-15 range, `false` otherwise.
- *
- * @note The check is exclusive (`lo < freq < hi`). If you need inclusive
- *       bounds, change to `lo <= freq && freq <= hi`.
- */
-bool WsprTransmitter::inWspr15Band(double freq) noexcept
-{
-    for (const auto &[lo, hi] : WSPR15_RANGES)
-    {
-        if (freq > lo && freq < hi)
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 /* Private Methods */
@@ -916,18 +858,15 @@ void WsprTransmitter::dma_cleanup()
     deallocate_memory_pool();
 
     // Close mailbox handle if open
-    if (mailbox_.handle >= 0)
+    if (mailbox_struct_.handle >= 0)
     {
-        mbox_close(mailbox_.handle);
-        mailbox_.handle = -1;
+        mailbox.mbox_close(mailbox_struct_.handle);
+        mailbox_struct_.handle = -1;
     }
 
-    // Remove the local device file if it exists
-    safe_remove();
-
     // Reset global configuration structures to defaults
-    dma_config_ = DMAConfig(); // Uses your in-class initializers
-    mailbox_ = Mailbox();      // Uses your in-class initializers
+    dma_config_ = DMAConfig();         // Uses your in-class initializers
+    mailbox_struct_ = MailboxStruct(); // Uses your in-class initializers
 }
 
 /**
@@ -1211,45 +1150,45 @@ void WsprTransmitter::get_plld_and_memflag()
 void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 {
     // Allocate a contiguous block of physical pages
-    mailbox_.mem_ref = mem_alloc(
-        mailbox_.handle,
+    mailbox_struct_.mem_ref = mailbox.mem_alloc(
+        mailbox_struct_.handle,
         PAGE_SIZE * numpages,
         BLOCK_SIZE,
         dma_config_.mem_flag);
-    if (mailbox_.mem_ref == 0)
+    if (mailbox_struct_.mem_ref == 0)
     {
         throw std::runtime_error("Error: mem_alloc failed.");
     }
 
     // Lock the block to obtain its bus address
-    mailbox_.bus_addr = mem_lock(mailbox_.handle, mailbox_.mem_ref);
-    if (mailbox_.bus_addr == 0)
+    mailbox_struct_.bus_addr = mailbox.mem_lock(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+    if (mailbox_struct_.bus_addr == 0)
     {
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.handle, mailbox_struct_.mem_ref);
         throw std::runtime_error("Error: mem_lock failed.");
     }
 
     // Map the locked pages into user‑space virtual memory
-    mailbox_.virt_addr = static_cast<unsigned char *>(
-        mapmem(bus_to_physical(mailbox_.bus_addr), PAGE_SIZE * numpages));
-    if (mailbox_.virt_addr == nullptr)
+    mailbox_struct_.virt_addr = static_cast<unsigned char *>(
+        mailbox.mapmem(bus_to_physical(mailbox_struct_.bus_addr), PAGE_SIZE * numpages));
+    if (mailbox_struct_.virt_addr == nullptr)
     {
-        mem_unlock(mailbox_.handle, mailbox_.mem_ref);
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_unlock(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.handle, mailbox_struct_.mem_ref);
         throw std::runtime_error("Error: mapmem failed.");
     }
 
     // Record pool parameters
-    mailbox_.pool_size = numpages; // total pages available
-    mailbox_.pool_cnt = 0;         // pages allocated so far
+    mailbox_struct_.pool_size = numpages; // total pages available
+    mailbox_struct_.pool_cnt = 0;         // pages allocated so far
 
     if (debug)
     {
         // Debug output: Show allocated bus & virtual addresses
         std::cout << "[DEBUG WsprTransmitter] allocate_memory_pool bus_addr=0x"
-                  << std::hex << mailbox_.bus_addr
-                  << " virt_addr=0x" << reinterpret_cast<unsigned long>(mailbox_.virt_addr)
-                  << " mem_ref=0x" << mailbox_.mem_ref
+                  << std::hex << mailbox_struct_.bus_addr
+                  << " virt_addr=0x" << reinterpret_cast<unsigned long>(mailbox_struct_.virt_addr)
+                  << " mem_ref=0x" << mailbox_struct_.mem_ref
                   << std::dec << std::endl;
     }
 }
@@ -1265,17 +1204,17 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
 {
     // Ensure that we do not exceed the allocated pool size.
-    if (mailbox_.pool_cnt >= mailbox_.pool_size)
+    if (mailbox_struct_.pool_cnt >= mailbox_struct_.pool_size)
     {
         throw std::runtime_error("Error: unable to allocate more pages.");
     }
 
     // Compute the offset for the next available page.
-    unsigned offset = mailbox_.pool_cnt * PAGE_SIZE;
+    unsigned offset = mailbox_struct_.pool_cnt * PAGE_SIZE;
 
     // Retrieve the virtual and bus addresses based on the offset.
-    *vAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_.virt_addr) + offset);
-    *bAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_.bus_addr) + offset);
+    *vAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.virt_addr) + offset);
+    *bAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.bus_addr) + offset);
 
     if (debug)
     {
@@ -1287,7 +1226,7 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
     }
 
     // Increment the count of allocated pages.
-    mailbox_.pool_cnt++;
+    mailbox_struct_.pool_cnt++;
 }
 
 /**
@@ -1298,23 +1237,23 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
 void WsprTransmitter::deallocate_memory_pool()
 {
     // Free virtual memory mapping if it was allocated.
-    if (mailbox_.virt_addr != nullptr)
+    if (mailbox_struct_.virt_addr != nullptr)
     {
-        unmapmem(mailbox_.virt_addr, mailbox_.pool_size * PAGE_SIZE);
-        mailbox_.virt_addr = nullptr; // Prevent dangling pointer usage
+        mailbox.unmapmem(mailbox_struct_.virt_addr, mailbox_struct_.pool_size * PAGE_SIZE);
+        mailbox_struct_.virt_addr = nullptr; // Prevent dangling pointer usage
     }
 
     // Free the allocated memory block if it was successfully allocated.
-    if (mailbox_.mem_ref != 0)
+    if (mailbox_struct_.mem_ref != 0)
     {
-        mem_unlock(mailbox_.handle, mailbox_.mem_ref);
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
-        mailbox_.mem_ref = 0; // Ensure it does not reference a freed block
+        mailbox.mem_unlock(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+        mailbox_struct_.mem_ref = 0; // Ensure it does not reference a freed block
     }
 
     // Reset pool tracking variables
-    mailbox_.pool_size = 0;
-    mailbox_.pool_cnt = 0;
+    mailbox_struct_.pool_size = 0;
+    mailbox_struct_.pool_cnt = 0;
 }
 
 /**
@@ -1602,35 +1541,12 @@ double WsprTransmitter::bit_trunc(const double &d, const int &lsb)
 void WsprTransmitter::open_mbox()
 {
     // Attempt to open the mailbox
-    mailbox_.handle = mbox_open();
+    mailbox_struct_.handle = mailbox.mbox_open();
 
     // Check for failure and handle the error
-    if (mailbox_.handle < 0)
+    if (mailbox_struct_.handle < 0)
     {
         throw std::runtime_error("Error: Failed to open mailbox.");
-    }
-}
-
-/**
- * @brief Safely removes a file if it exists.
- * @details Checks whether the specified file exists before attempting to remove it.
- *          If the file exists but removal fails, a warning is displayed.
- *
- * @param[in] filename Pointer to a null-terminated string containing the file path.
- */
-void WsprTransmitter::safe_remove()
-{
-    const char *filename = LOCAL_DEVICE_FILE_NAME;
-    struct stat buffer;
-
-    // Check if the file exists before attempting to remove it
-    if (stat(filename, &buffer) == 0)
-    {
-        // Attempt to remove the file
-        if (unlink(filename) != 0)
-        {
-            std::cerr << "Warning: Failed to remove " << filename << std::endl;
-        }
     }
 }
 
@@ -1784,9 +1700,9 @@ void WsprTransmitter::setup_dma()
 
     // 4) open mailbox & pool
     MailboxHandle mbox;
-    mailbox_.handle = mbox.get();
+    mailbox_struct_.handle = mbox.get();
     mbox.release();
-    MailboxMemoryPool pool(mailbox_.handle, /*numpages=*/1025, dma_config_.mem_flag);
+    MailboxMemoryPool pool(mailbox_struct_.handle, /*numpages=*/1025, dma_config_.mem_flag);
 
     // 5) build DMA pages (old signature)
     create_dma_pages(const_page_, instr_page_, instructions_);

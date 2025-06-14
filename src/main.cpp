@@ -9,6 +9,7 @@
 #include <csignal>            // sigaction, std::signal
 #include <cstring>            // strsignal()
 #include <cstdio>             // getchar()
+#include <iomanip>            // std::ostringstream
 #include <iostream>           // std::cout, std::getline
 #include <mutex>              // g_end_mtx
 #include <string>             // std::string
@@ -169,6 +170,13 @@ void start_cb(const std::string &msg = {})
     }
 }
 
+void start_cb(double frequency)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6) << frequency;
+    start_cb(oss.str());
+}
+
 void end_cb(const std::string &msg = {})
 {
     if (!msg.empty())
@@ -218,12 +226,25 @@ int main()
 
     // — get PPM correction and schedule priority —
     config.ppm = get_ppm_from_chronyc();
-    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 30);
+
+    // Set transmission server and set priority
+    wsprTransmitter.setThreadScheduling(SCHED_RR, 40);
 
     // — configure transmitter —
     if (isWspr)
     {
-        wsprTransmitter.setTransmissionCallbacks(start_cb, end_cb);
+        // Set transmission event callbacks
+        wsprTransmitter.setTransmissionCallbacks(
+            [](const WsprTransmitter::CallbackArg &arg)
+            {
+                start_cb(std::get<double>(arg));
+            },
+            [](const WsprTransmitter::CallbackArg &arg)
+            {
+                end_cb(std::get<std::string>(arg));
+            });
+
+        // Set minimum transmission data
         wsprTransmitter.setupTransmission(
             0.0, 0, config.ppm,
             "AA0NT", "EM18", 20, /*use_offset=*/true);
