@@ -669,7 +669,7 @@ private:
         int handle = -1;       ///< mailbox fd
         unsigned mem_ref = 0;  ///< mem_alloc()
         unsigned bus_addr = 0; ///< mem_lock()
-        unsigned char *virt_addr = nullptr;
+        volatile uint8_t *virt_addr = nullptr;
         unsigned pool_size = 0; ///< total DMA pages
         unsigned pool_cnt = 0;  ///< pages handed out
     };

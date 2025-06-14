@@ -179,7 +179,7 @@ namespace
         int mbox_fd_;
         size_t total_size_;
         unsigned mem_ref_, bus_addr_;
-        unsigned char *virt_addr_;
+        volatile uint8_t *virt_addr_;
 
     public:
         /**
@@ -205,7 +205,7 @@ namespace
             }
             // Map
             auto phys = static_cast<off_t>(bus_addr_ & ~0xC0000000UL);
-            virt_addr_ = static_cast<unsigned char *>(mailbox.mapmem(phys, total_size_));
+            virt_addr_ = mailbox.mapmem(phys, total_size_);
             if (!virt_addr_)
             {
                 mailbox.mem_unlock(mbox_fd_, mem_ref_);
@@ -229,7 +229,7 @@ namespace
         }
 
         /** @return Virtual base pointer for the DMA pages. */
-        unsigned char *virt() const { return virt_addr_; }
+        volatile uint8_t *virt() const { return virt_addr_; }
         /** @return Bus address of the first DMA page. */
         unsigned bus() const { return bus_addr_; }
         /** @return Total size of the mapped region, in bytes. */
@@ -1134,8 +1134,7 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     }
 
     // Map the locked pages into user‑space virtual memory
-    mailbox_struct_.virt_addr = static_cast<unsigned char *>(
-        mailbox.mapmem(bus_to_physical(mailbox_struct_.bus_addr), PAGE_SIZE * numpages));
+    mailbox_struct_.virt_addr = mailbox.mapmem(bus_to_physical(mailbox_struct_.bus_addr), PAGE_SIZE * numpages);
     if (mailbox_struct_.virt_addr == nullptr)
     {
         mailbox.mem_unlock(mailbox_struct_.handle, mailbox_struct_.mem_ref);
