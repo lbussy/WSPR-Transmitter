@@ -140,41 +140,6 @@ namespace
     };
 
     /**
-     * @brief RAII wrapper for a Broadcom mailbox handle.
-     *
-     * Opens the mailbox in the constructor and closes it in the destructor.
-     * Throws if `mbox_open()` fails.
-     */
-    class MailboxHandle
-    {
-        int fd_;
-
-    public:
-        /** @throws std::runtime_error if `mbox_open()` returns < 0. */
-        MailboxHandle() : fd_(mailbox.mbox_open())
-        {
-            if (fd_ < 0)
-                throw std::runtime_error("MailboxHandle: mbox_open failed");
-        }
-
-        ~MailboxHandle()
-        {
-            if (fd_ >= 0)
-                mailbox.mbox_close(fd_);
-        }
-
-        /** @return The mailbox file descriptor. */
-        int get() const { return fd_; }
-
-        /**
-         * @brief Release ownership so the destructor won’t close.
-         *
-         * Use after transferring `fd_` to `mailbox_struct_.handle`.
-         */
-        void release() { fd_ = -1; }
-    };
-
-    /**
      * @brief Determine the SOC peripheral base address from the device tree.
      *
      * Reads the 4-byte values at offsets 4 and 8 of
@@ -1676,10 +1641,10 @@ void WsprTransmitter::create_dma_pages(
  */
 void WsprTransmitter::setup_dma()
 {
-    // 1) PLLD & mem‐flag
+    // PLLD & mem‐flag
     get_plld_and_memflag();
 
-    // 2) map peripherals
+    // Map peripherals
     int mem_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
     if (mem_fd < 0)
         throw std::runtime_error(std::string("setup_dma: open /dev/mem: ") + std::strerror(errno));
@@ -1689,7 +1654,7 @@ void WsprTransmitter::setup_dma()
     dma_config_.peripheral_base_virtual = region.get();
     region.release();
 
-    // 3) snapshot regs
+    // Snapshot regs
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
     dma_config_.orig_gp0div = access_bus_address(CM_GP0DIV_BUS);
     dma_config_.orig_pwm_ctl = access_bus_address(PWM_BUS_BASE + 0x00);
@@ -1698,16 +1663,14 @@ void WsprTransmitter::setup_dma()
     dma_config_.orig_pwm_rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
     dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
 
-    // 4) open mailbox & pool
-    MailboxHandle mbox;
-    mailbox_struct_.handle = mbox.get();
-    mbox.release();
+    // Open mailbox & pool
+    mailbox_struct_.handle = mailbox.mbox_open();
     MailboxMemoryPool pool(mailbox_struct_.handle, /*numpages=*/1025, dma_config_.mem_flag);
 
-    // 5) build DMA pages (old signature)
+    // Build DMA pages (old signature)
     create_dma_pages(const_page_, instr_page_, instructions_);
 
-    // 6) done
+    // Done
     dma_setup_done_ = true;
 }
 
