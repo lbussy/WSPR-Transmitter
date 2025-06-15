@@ -275,6 +275,7 @@ int main()
     if (isWspr)
     {
         std::unique_lock<std::mutex> lk(g_end_mtx);
+
         // Wake every 100 ms to check for either completion or a Ctrl-C
         while (!g_transmission_done && !g_terminate.load(std::memory_order_acquire))
         {

@@ -29,6 +29,7 @@
 #include "wspr_message.hpp" // WsprMessage Submodule
 
 #include "mailbox.hpp" // Broadcom Mailbox Submodule
+#include "bcm_model.hpp"
 
 // C++ Standard Library Headers
 #include <algorithm> // std::copy_n, std::clamp
@@ -82,31 +83,27 @@ namespace
     // TODO:  Review for 64-bit safety
     class MailboxMemoryPool
     {
-        int mbox_fd_;
         size_t total_size_;
         unsigned mem_ref_, bus_addr_;
         volatile uint8_t *virt_addr_;
 
     public:
         /**
-         * @param mbox_fd   Open mailbox descriptor.
          * @param numpages  Number of pages to allocate (1 const + N instr).
-         * @param mem_flag  The mailbox allocation flag from `dma_config_.mem_flag`.
          */
-        MailboxMemoryPool(int mbox_fd, unsigned numpages, uint32_t mem_flag)
-            : mbox_fd_(mbox_fd),
-              total_size_(numpages * kPageSize),
+        MailboxMemoryPool(unsigned numpages)
+            : total_size_(numpages * kPageSize),
               mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
         {
             // Allocate
-            mem_ref_ = mailbox.mem_alloc(mbox_fd_, total_size_, kBlockSize, mem_flag);
+            mem_ref_ = mailbox.mem_alloc(total_size_, kBlockSize);
             if (!mem_ref_)
                 throw std::runtime_error("MailboxMemoryPool: mem_alloc failed");
             // Lock
-            bus_addr_ = mailbox.mem_lock(mbox_fd_, mem_ref_);
+            bus_addr_ = mailbox.mem_lock(mem_ref_);
             if (!bus_addr_)
             {
-                mailbox.mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mem_lock failed");
             }
             // Map
@@ -114,8 +111,8 @@ namespace
             virt_addr_ = mailbox.mapmem(phys, total_size_);
             if (!virt_addr_)
             {
-                mailbox.mem_unlock(mbox_fd_, mem_ref_);
-                mailbox.mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_unlock(mem_ref_);
+                mailbox.mem_free(mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mapmem failed");
             }
         }
@@ -129,8 +126,8 @@ namespace
             }
             if (bus_addr_)
             {
-                mailbox.mem_unlock(mbox_fd_, mem_ref_);
-                mailbox.mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_unlock(mem_ref_);
+                mailbox.mem_free(mem_ref_);
             }
         }
 
@@ -680,7 +677,7 @@ void WsprTransmitter::join_transmission()
  *   4. Reset the DMA controller.
  *   5. Unmap the peripheral base address region.
  *   6. Deallocate mailbox memory pages.
- *   7. Close the mailbox handle.
+ *   7. Close the mailbox.
  *   8. Remove the local device file.
  *   9. Reset all configuration data to defaults.
  *
@@ -726,12 +723,8 @@ void WsprTransmitter::dma_cleanup()
     // Deallocate mailbox-allocated memory pages
     deallocate_memory_pool();
 
-    // Close mailbox handle if open
-    if (mailbox_struct_.handle >= 0)
-    {
-        mailbox.mbox_close(mailbox_struct_.handle);
-        mailbox_struct_.handle = -1;
-    }
+    // Close mailbox if open
+    mailbox.mbox_close();
 
     // Reset global configuration structures to defaults
     dma_config_ = DMAConfig();         // Uses your in-class initializers
@@ -920,15 +913,14 @@ int WsprTransmitter::symbol_timeval_subtract(struct timeval *result, const struc
  *   1. Reads the Raspberry Pi hardware revision from `/proc/cpuinfo` (cached
  *      after first read).
  *   2. Determines the processor ID (BCM2835, BCM2836/37, or BCM2711).
- *   3. Sets `dma_config_.mem_flag` to the correct mailbox allocation flag.
- *   4. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
+ *   3. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
  *      frequency (500 MHz for Pi 1/2/3, 750 MHz for Pi 4).
- *   5. Initializes `dma_config_.plld_clock_frequency` equal to
+ *   4. Initializes `dma_config_.plld_clock_frequency` equal to
  *      `plld_nominal_freq` (zero PPM correction).
  *
  * @throws std::runtime_error if the processor ID is unrecognized.
  */
-void WsprTransmitter::get_plld_and_memflag()
+void WsprTransmitter::get_plld()
 {
     // Cache the revision to avoid repeated file I/O
     static std::optional<unsigned> cached_revision;
@@ -951,37 +943,43 @@ void WsprTransmitter::get_plld_and_memflag()
         }
         if (!cached_revision)
         {
-            cached_revision = 0; // fallback if parsing fails
+            cached_revision = 0; // Fallback if parsing fails
         }
     }
 
-    const unsigned rev = *cached_revision;
+    unsigned rev = *cached_revision;
+    BCMChip proc_id;
 
-    // Extract processor ID (high‑bit indicates new format)
-    const int proc_id = (rev & 0x800000)
-                            ? ((rev & 0xF000) >> 12)
-                            : BCM_HOST_PROCESSOR_BCM2835;
+    if (rev & 0x800000)
+    {
+        auto raw = (rev & 0xF000) >> 12;
+        proc_id = static_cast<BCMChip>(raw);
+    }
+    else
+    {
+        proc_id = BCMChip::BCM_HOST_PROCESSOR_BCM2835;
+    }
 
-    // Determine base PLLD frequency and mailbox flag
     double base_freq_hz = 500e6;
     switch (proc_id)
     {
-    case BCM_HOST_PROCESSOR_BCM2835: // Pi 1
-        dma_config_.mem_flag = 0x0C;
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2835: // Pi 1
         base_freq_hz = 500e6;
         break;
-    case BCM_HOST_PROCESSOR_BCM2836: // Pi 2
-    case BCM_HOST_PROCESSOR_BCM2837: // Pi 3
-        dma_config_.mem_flag = 0x04;
+
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2836: // Pi 2
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2837: // Pi 3
         base_freq_hz = 500e6;
         break;
-    case BCM_HOST_PROCESSOR_BCM2711: // Pi 4
-        dma_config_.mem_flag = 0x04;
+
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2711: // Pi 4
         base_freq_hz = 750e6;
         break;
+
     default:
         throw std::runtime_error(
-            "Error: Unknown chipset (" + std::to_string(proc_id) + ")");
+            std::string("Error: Unknown chipset (") +
+            std::string(to_string(proc_id)) + ")");
     }
 
     // Store nominal and initial (zero‑PPM) working frequency
@@ -1016,20 +1014,18 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 {
     // Allocate a contiguous block of physical pages
     mailbox_struct_.mem_ref = mailbox.mem_alloc(
-        mailbox_struct_.handle,
         PAGE_SIZE * numpages,
-        BLOCK_SIZE,
-        dma_config_.mem_flag);
+        BLOCK_SIZE);
     if (mailbox_struct_.mem_ref == 0)
     {
         throw std::runtime_error("Error: mem_alloc failed.");
     }
 
     // Lock the block to obtain its bus address
-    mailbox_struct_.bus_addr = mailbox.mem_lock(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+    mailbox_struct_.bus_addr = mailbox.mem_lock(mailbox_struct_.mem_ref);
     if (mailbox_struct_.bus_addr == 0)
     {
-        mailbox.mem_free(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.mem_ref);
         throw std::runtime_error("Error: mem_lock failed.");
     }
 
@@ -1037,8 +1033,8 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     mailbox_struct_.virt_addr = mailbox.mapmem(bus_to_physical(mailbox_struct_.bus_addr), PAGE_SIZE * numpages);
     if (mailbox_struct_.virt_addr == nullptr)
     {
-        mailbox.mem_unlock(mailbox_struct_.handle, mailbox_struct_.mem_ref);
-        mailbox.mem_free(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+        mailbox.mem_unlock(mailbox_struct_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.mem_ref);
         throw std::runtime_error("Error: mapmem failed.");
     }
 
@@ -1110,8 +1106,8 @@ void WsprTransmitter::deallocate_memory_pool()
     // Free the allocated memory block if it was successfully allocated.
     if (mailbox_struct_.mem_ref != 0)
     {
-        mailbox.mem_unlock(mailbox_struct_.handle, mailbox_struct_.mem_ref);
-        mailbox.mem_free(mailbox_struct_.handle, mailbox_struct_.mem_ref);
+        mailbox.mem_unlock(mailbox_struct_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.mem_ref);
         mailbox_struct_.mem_ref = 0; // Ensure it does not reference a freed block
     }
 
@@ -1404,14 +1400,8 @@ double WsprTransmitter::bit_trunc(const double &d, const int &lsb)
  */
 void WsprTransmitter::open_mbox()
 {
-    // Attempt to open the mailbox
-    mailbox_struct_.handle = mailbox.mbox_open();
-
-    // Check for failure and handle the error
-    if (mailbox_struct_.handle < 0)
-    {
-        throw std::runtime_error("Error: Failed to open mailbox.");
-    }
+    // Open the mailbox
+    mailbox.mbox_open();
 }
 
 /**
@@ -1537,8 +1527,11 @@ void WsprTransmitter::create_dma_pages(
  */
 void WsprTransmitter::setup_dma()
 {
+    // Open the mailbox
+    open_mbox();
+
     // PLLD & mem-flag
-    get_plld_and_memflag();
+    get_plld();
 
     // Map peripherals via mailbox.mapmem()
     uint32_t base = Mailbox::discover_peripheral_base();
@@ -1553,9 +1546,8 @@ void WsprTransmitter::setup_dma()
     dma_config_.orig_pwm_rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
     dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
 
-    // Open mailbox & pool
-    mailbox_struct_.handle = mailbox.mbox_open();
-    MailboxMemoryPool pool(mailbox_struct_.handle, /*numpages=*/1025, dma_config_.mem_flag);
+    // Create memory pool
+    MailboxMemoryPool pool(/*numpages=*/1025);
 
     // Build DMA pages (old signature)
     create_dma_pages(const_page_, instr_page_, instructions_);
