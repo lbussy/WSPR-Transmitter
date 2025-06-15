@@ -597,11 +597,10 @@ private:
      */
     struct DMAConfig
     {
-        double plld_nominal_freq;      ///< PLLD clock frequency in Hz before any PPM correction.
-        double plld_clock_frequency;   ///< PLLD clock frequency in Hz after PPM correction.
-        int mem_flag;                  ///< Mailbox memory allocation flags for DMA.
-        void *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
-        size_t peripheral_map_size;
+        double plld_nominal_freq;                  ///< PLLD clock frequency in Hz before any PPM correction.
+        double plld_clock_frequency;               ///< PLLD clock frequency in Hz after PPM correction.
+        int mem_flag;                              ///< Mailbox memory allocation flags for DMA.
+        volatile uint8_t *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
         uint32_t orig_gp0ctl;      ///< Saved GP0CTL register (clock control).
         uint32_t orig_gp0div;      ///< Saved GP0DIV register (clock divider).
         uint32_t orig_pwm_ctl;     ///< Saved PWM control register.
@@ -624,7 +623,6 @@ private:
               plld_clock_frequency(plld_nominal_freq),
               mem_flag(0x0c),
               peripheral_base_virtual(nullptr),
-              peripheral_map_size{0},
               orig_gp0ctl(0),
               orig_gp0div(0),
               orig_pwm_ctl(0),

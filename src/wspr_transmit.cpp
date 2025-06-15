@@ -63,104 +63,9 @@ constexpr const bool debug = false;
 // Helper classes and functions in anonymous namespace
 namespace
 {
-    /**
-     * @brief Read a 4-byte big-endian integer from a device-tree file.
-     *
-     * Attempts to open `file` in binary mode, seek to `off`, and read exactly 4 bytes.
-     * Returns std::nullopt on any I/O error.
-     *
-     * @param file Path to the device-tree property file.
-     * @param off  Byte offset within the file to begin reading.
-     * @return std::optional<uint32_t> The parsed 32-bit big-endian value, or nullopt.
-     */
-    static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
-    {
-        std::ifstream f(file, std::ios::binary);
-        if (!f)
-            return std::nullopt;
-        f.seekg(off);
-        uint8_t buf[4];
-        if (f.read(reinterpret_cast<char *>(buf), sizeof(buf)))
-        {
-            return (uint32_t(buf[0]) << 24) | (uint32_t(buf[1]) << 16) | (uint32_t(buf[2]) << 8) | uint32_t(buf[3]);
-        }
-        return std::nullopt;
-    }
-
     // We hard-code 4 KB page/block sizes here because the class’s PAGE_SIZE/BLOCK_SIZE are private.
     static constexpr size_t kPageSize = 4 * 1024;
     static constexpr size_t kBlockSize = 4 * 1024;
-
-    /**
-     * @brief RAII wrapper for a memory-mapped I/O region.
-     *
-     * Maps a physical address range via `/dev/mem` on construction and unmaps it
-     * on destruction (unless released). Throws on mmap failure.
-     *
-     * @note Use `release()` if you hand ownership of the mapping elsewhere.
-     */
-    class MMapRegion
-    {
-        void *ptr_;
-        size_t size_;
-
-    public:
-        /**
-         * @param fd     File descriptor for `/dev/mem` (must already be open).
-         * @param offset Physical address offset to map.
-         * @param size   Length of the region, in bytes.
-         * @throws std::runtime_error if `mmap` fails.
-         */
-        MMapRegion(int fd, off_t offset, size_t size)
-            : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset)),
-              size_(size)
-        {
-            if (ptr_ == MAP_FAILED)
-            {
-                throw std::runtime_error("MMapRegion: mmap failed: " + std::string(std::strerror(errno)));
-            }
-        }
-
-        /** Unmap the region unless it has been released. */
-        ~MMapRegion()
-        {
-            if (ptr_)
-                munmap(ptr_, size_);
-        }
-
-        /** @return The mapped pointer. */
-        void *get() const { return ptr_; }
-        /**
-         * @brief Release ownership so the destructor won’t unmap.
-         *
-         * Call after moving `ptr_` into another owner (e.g. storing
-         * in `dma_config_.peripheral_base_virtual`).
-         */
-        void release() { ptr_ = nullptr; }
-    };
-
-    /**
-     * @brief Determine the SOC peripheral base address from the device tree.
-     *
-     * Reads the 4-byte values at offsets 4 and 8 of
-     * `/proc/device-tree/soc/ranges` to discover the peripheral base.
-     * Falls back to 0x2000 0000 if neither is available.
-     *
-     * @return The bus address to pass as the offset for `mmap()`.
-     */
-    static off_t discover_peripheral_base()
-    {
-        uint32_t base = 0x20000000;
-        if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0)
-        {
-            base = *v;
-        }
-        else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v)
-        {
-            base = *v;
-        }
-        return static_cast<off_t>(base);
-    }
 
     /**
      * @brief RAII for a pool of DMA-capable pages allocated via mailbox.
@@ -174,6 +79,7 @@ namespace
      *
      * @throws std::runtime_error on any mailbox or mapping failure.
      */
+    // TODO:  Review for 64-bit safety
     class MailboxMemoryPool
     {
         int mbox_fd_;
@@ -813,10 +719,8 @@ void WsprTransmitter::dma_cleanup()
     // Unmap peripheral region if mapped
     if (dma_config_.peripheral_base_virtual)
     {
-        munmap(dma_config_.peripheral_base_virtual,
-               dma_config_.peripheral_map_size);
+        ::mailbox.unmapmem(dma_config_.peripheral_base_virtual, kPageSize * 4096);
         dma_config_.peripheral_base_virtual = nullptr;
-        dma_config_.peripheral_map_size = 0;
     }
 
     // Deallocate mailbox-allocated memory pages
@@ -940,12 +844,8 @@ inline volatile int &WsprTransmitter::access_bus_address(std::uintptr_t bus_addr
     // Compute byte‐offset from the bus address
     std::uintptr_t offset = bus_addr - 0x7E000000UL;
 
-    // Treat the void* as a char* (1‐byte pointer) so pointer arithmetic
-    // is in bytes.
-    auto base = static_cast<char *>(dma_config_.peripheral_base_virtual);
-
     // Add the offset, then cast to a volatile‐int pointer and dereference.
-    return *reinterpret_cast<volatile int *>(base + offset);
+    return *reinterpret_cast<volatile int *>(dma_config_.peripheral_base_virtual + offset);
 }
 
 /**
@@ -1608,12 +1508,9 @@ void WsprTransmitter::create_dma_pages(
     // Compute the byte‐offset from the bus base (0x7E000000) to your desired
     // DMA register block (DMA_BUS_BASE).
     std::uintptr_t delta = DMA_BUS_BASE - 0x7E000000UL;
-    //
-    // Treat your void* as a char* so arithmetic is in bytes
-    auto base = static_cast<char *>(dma_config_.peripheral_base_virtual);
-    //
+
     // Add the offset, then cast to your register pointer
-    volatile int *dma_base = reinterpret_cast<volatile int *>(base + delta);
+    volatile uint8_t *dma_base = dma_config_.peripheral_base_virtual + delta;
 
     // Cast to DMAregs pointer to activate DMA
     volatile struct DMAregs *DMA0 = reinterpret_cast<volatile struct DMAregs *>(dma_base);
@@ -1640,18 +1537,12 @@ void WsprTransmitter::create_dma_pages(
  */
 void WsprTransmitter::setup_dma()
 {
-    // PLLD & mem‐flag
+    // PLLD & mem-flag
     get_plld_and_memflag();
 
-    // Map peripherals
-    int mem_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
-    if (mem_fd < 0)
-        throw std::runtime_error(std::string("setup_dma: open /dev/mem: ") + std::strerror(errno));
-    off_t base = discover_peripheral_base();
-    MMapRegion region(mem_fd, base, kPageSize * 4096 /*=0x01000000*/);
-    ::close(mem_fd);
-    dma_config_.peripheral_base_virtual = region.get();
-    region.release();
+    // Map peripherals via mailbox.mapmem()
+    uint32_t base = Mailbox::discover_peripheral_base();
+    dma_config_.peripheral_base_virtual = ::mailbox.mapmem(base, kPageSize * 4096 /*=0x01000000*/);
 
     // Snapshot regs
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
