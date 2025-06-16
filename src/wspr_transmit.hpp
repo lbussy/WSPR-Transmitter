@@ -27,18 +27,24 @@
 #ifndef _WSPR_TRANSMIT_HPP
 #define _WSPR_TRANSMIT_HPP
 
+// Project header
 #include "wspr_message.hpp"
 
-#include <array>              // std::array
-#include <atomic>             // std::atomic
-#include <chrono>             // std::chrono in TransmissionScheduler
-#include <condition_variable> // std::condition_variable
-#include <functional>         // std::function
-#include <mutex>              // std::mutex
-#include <string>             // std::string
-#include <thread>             // std::thread
-#include <variant>            // std::variant
-#include <vector>             // std::vector
+// C++ Standard Library
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>        // for std::uint32_t, etc.
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <variant>
+#include <vector>
+
+// POSIX/System headers
+#include <sys/time.h>     // for struct timeval
 
 /**
  * @class WsprTransmitter
