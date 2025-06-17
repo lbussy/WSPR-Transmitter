@@ -1345,11 +1345,12 @@ void WsprTransmitter::transmit_symbol(
     }
     // Final debug
     if (debug)
-        std::cout << "[DEBUG WsprTransmitter] <instructions_[bufPtr] = 0x"
+        // Print the virtual pointer as an integer and the bus address (uintptr_t)
+        std::cout << "[DEBUG WsprTransmitter] <instructions_[" << bufPtr << "] = 0x"
                   << std::hex
-                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].v)
+                  << reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].v)
                   << " 0x"
-                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].b)
+                  << static_cast<unsigned long long>(instructions_[bufPtr].b)
                   << std::dec << ">" << std::endl;
 }
 
@@ -1424,7 +1425,13 @@ void WsprTransmitter::create_dma_pages(
     allocate_memory_pool(1025);
 
     // Allocate a memory page for storing constants
-    get_real_mem_page_from_pool(&const_page_.v, &const_page_.b);
+    {
+        // allocate a real memory page for constants
+        void *tmp_v, *tmp_b;
+        get_real_mem_page_from_pool(&tmp_v, &tmp_b);
+        const_page_.v = tmp_v;
+        const_page_.b = reinterpret_cast<std::uintptr_t>(tmp_b);
+    }
 
     // Initialize instruction counter
     int instrCnt = 0;
@@ -1433,7 +1440,13 @@ void WsprTransmitter::create_dma_pages(
     while (instrCnt < 1024)
     {
         // Allocate a memory page for instructions
-        get_real_mem_page_from_pool(&instr_page_.v, &instr_page_.b);
+        {
+            // allocate a real memory page for this CB page
+            void *tmp_v, *tmp_b;
+            get_real_mem_page_from_pool(&tmp_v, &tmp_b);
+            instr_page_.v = tmp_v;
+            instr_page_.b = reinterpret_cast<std::uintptr_t>(tmp_b);
+        }
 
         // Create DMA control blocks (CBs)
         struct CB *instr0 = reinterpret_cast<struct CB *>(instr_page_.v);
@@ -1441,11 +1454,12 @@ void WsprTransmitter::create_dma_pages(
         for (int i = 0; i < static_cast<int>(PAGE_SIZE / sizeof(struct CB)); i++)
         {
             // Assign virtual and bus addresses for each instruction
-            instructions_[instrCnt].v = reinterpret_cast<void *>(reinterpret_cast<long int>(instr_page_.v) + sizeof(struct CB) * i);
-            instructions_[instrCnt].b = reinterpret_cast<void *>(reinterpret_cast<long int>(instr_page_.b) + sizeof(struct CB) * i);
+            instructions_[instrCnt].v = static_cast<void *>(static_cast<char *>(instr_page_.v) + sizeof(struct CB) * i);
+            instructions_[instrCnt].b = instr_page_.b + static_cast<std::uintptr_t>(sizeof(struct CB) * i);
 
-            // Configure DMA transfer: Source = constant memory page, Destination = PWM FIFO
-            instr0->SOURCE_AD = reinterpret_cast<unsigned long int>(const_page_.b) + 2048;
+            // Configure DMA transfer: Source = constant memory page, Destination = PWM FI
+            // On 64-bit, const_page_.b is already a uintptr_t; truncate to 32 bits for the register.
+            instr0->SOURCE_AD = static_cast<uint32_t>(const_page_.b + 2048);
             instr0->DEST_AD = PWM_BUS_BASE + 0x18; // FIFO1
             instr0->TXFR_LEN = 4;
             instr0->STRIDE = 0;
@@ -1464,7 +1478,9 @@ void WsprTransmitter::create_dma_pages(
             // Link previous instruction to the next in the DMA sequence
             if (instrCnt != 0)
             {
-                reinterpret_cast<struct CB *>(instructions_[instrCnt - 1].v)->NEXTCONBK = reinterpret_cast<long int>(instructions_[instrCnt].b);
+                // On 64-bit, truncate the bus address to 32 bits for the DMA engine:
+                reinterpret_cast<volatile CB *>(instructions_[instrCnt - 1].v)
+                    ->NEXTCONBK = static_cast<uint32_t>(instructions_[instrCnt].b);
             }
 
             instr0++;
@@ -1472,8 +1488,12 @@ void WsprTransmitter::create_dma_pages(
         }
     }
 
-    // Create a circular linked list of DMA instructions
-    reinterpret_cast<struct CB *>(instructions_[1023].v)->NEXTCONBK = reinterpret_cast<long int>(instructions_[0].b);
+    // Create a circular linked list of DMA instructions (64-bit safe)
+    reinterpret_cast<volatile CB *>(instructions_[1023].v)
+        ->NEXTCONBK = static_cast<uint32_t>(instructions_[0].b);
+    // Create a circular linked list of DMA instructions (64-bit safe)
+    reinterpret_cast<volatile CB *>(instructions_[1023].v)
+        ->NEXTCONBK = static_cast<uint32_t>(instructions_[0].b);
 
     // Configure the PWM clock (disable, set divisor, enable)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000026; // Source = PLLD, disable
@@ -1507,7 +1527,8 @@ void WsprTransmitter::create_dma_pages(
     DMA0->CS = 1 << 31; // Reset DMA
     DMA0->CONBLK_AD = 0;
     DMA0->TI = 0;
-    DMA0->CONBLK_AD = reinterpret_cast<unsigned long int>(instr_page_.b);
+    // on a 64-bit build, DMA regs are only 32 bits wide
+    DMA0->CONBLK_AD = static_cast<uint32_t>(instr_page_.b);
     DMA0->CS = (1 << 0) | (255 << 16); // Enable DMA, priority level 255
 }
 

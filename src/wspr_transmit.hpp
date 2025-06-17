@@ -332,7 +332,7 @@ private:
      */
     struct PageInfo
     {
-        void *b; ///< Bus address.
+        std::uintptr_t b; ///< Bus address.
         void *v; ///< Virtual address.
     };
 
