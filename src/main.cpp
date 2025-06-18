@@ -5,6 +5,7 @@
 
 // C++ Standard Library
 #include <array>              // std::array for signal list
+#include <chrono>             // std::chrono
 #include <condition_variable> // g_end_cv
 #include <csignal>            // sigaction, std::signal
 #include <cstring>            // strsignal()
@@ -18,12 +19,17 @@
 #include <termios.h> // tcgetattr(), tcsetattr()
 #include <unistd.h>  // STDIN_FILENO
 
+// Frequency choices
 static constexpr double _80m = 3568600.0;
 static constexpr double _40m = 7038600.0;
 static constexpr double _20m = 14095600.0;
 static constexpr double freq_ = _80m;
 
-// At file scope
+// Time/duration tracking
+std::chrono::high_resolution_clock::time_point start_time;
+std::chrono::duration<double> elapsed;
+
+// Thread tracking/execution
 static std::mutex g_end_mtx;
 static std::condition_variable g_end_cv;
 static bool g_transmission_done = false;
@@ -128,6 +134,7 @@ bool select_wspr()
 
         if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0)
         {
+            std::cout << std::endl;
             if (errno == EINTR)
                 continue;
             throw std::runtime_error("select failed");
@@ -135,6 +142,7 @@ bool select_wspr()
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
         {
             // Got Ctrl-C
+            std::cout << std::endl;
             return false; // Or exit early
         }
         if (FD_ISSET(STDIN_FILENO, &rfds))
@@ -142,6 +150,7 @@ bool select_wspr()
             char c;
             if (::read(STDIN_FILENO, &c, 1) == 1)
             {
+                std::cout << std::endl;
                 if (c == '2')
                     return false;
                 else
@@ -149,6 +158,7 @@ bool select_wspr()
             }
         }
     }
+    std::cout << std::endl;
     return false;
 }
 
@@ -158,35 +168,47 @@ void sig_handler(int)
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
     wsprTransmitter.shutdownTransmitter();
     g_terminate.store(true);
-    // wWke any select()/poll() on your self-pipe
+    // Wake any select()/poll() on your self-pipe
     const char wake = 1;
     write(sig_pipe_fds[1], &wake, 1);
 }
 
 void start_cb(const std::string &msg = {})
 {
+    start_time = std::chrono::high_resolution_clock::now();
+
     if (!msg.empty())
     {
-        std::cout << "[CALLBACK] Started transmission (" << msg << ")." << std::endl;
+        // Print with frequency as string
+        std::cout << "Started transmission (" << msg << ")." << std::endl;
     }
     else
     {
-        std::cout << "[CALLBACK] Started transmission." << std::endl;
+       std::cout << "Started transmission." << std::endl;
     }
 }
 
-void start_cb(double frequency)
+void start_cb(double frequency_hz)
 {
+    // convert Hz → MHz
+    double frequency_mhz = frequency_hz / 1e6;
+
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(6) << frequency;
+    oss << std::fixed
+        << std::setprecision(6)
+        << frequency_mhz
+        << " MHz";
+
     start_cb(oss.str());
 }
 
 void end_cb(const std::string &msg = {})
 {
-    if (!msg.empty())
+    elapsed = std::chrono::high_resolution_clock::now() - start_time;
+
+    if (msg.length() <= 1)
     {
-        // Handle the extra info
+        std::cout << "[CALLBACK] Completed transmission." << std::endl;
     }
     else
     {
@@ -227,13 +249,13 @@ int main()
         // We saw Ctrl-C in the prompt, so bail out immediately
         return 0;
     }
-    std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << "\n";
+    std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << std::endl;
 
     // Get PPM correction and schedule priority
     config.ppm = get_ppm_from_chronyc();
 
     // Set transmission server and set priority
-    wsprTransmitter.setThreadScheduling(SCHED_RR, 40);
+    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 40);
 
     // Configure transmitter
     if (isWspr)
@@ -259,13 +281,19 @@ int main()
         wsprTransmitter.setupTransmission(freq_, 0, config.ppm);
     }
 
+#ifdef DEBUG_WSPR_TRANSMIT
     wsprTransmitter.printParameters();
-    std::cout << "Setup for " << (isWspr ? "WSPR" : "tone") << " complete.\n";
+#endif
+    std::cout << "Setup for " << (isWspr ? "WSPR" : "tone") << " complete." << std::endl;
 
     // For tone mode, wait to start
-    if (!isWspr)
+    if (isWspr)
     {
-        std::cout << "Press <spacebar> to begin test tone.\n";
+        std::cout << "Waiting for next transmission window." << std::endl;
+    }
+    else
+    {
+        std::cout << "Press <spacebar> to begin test tone." << std::endl;
         wait_for_space_or_signal();
     }
 
@@ -276,26 +304,31 @@ int main()
     {
         std::unique_lock<std::mutex> lk(g_end_mtx);
 
-        // Wake every 100 ms to check for either completion or a Ctrl-C
-        while (!g_transmission_done && !g_terminate.load(std::memory_order_acquire))
+        // Wake every 100 ms to check for either completion or a Ctrl-C.
+        while (!g_transmission_done &&
+               !g_terminate.load(std::memory_order_acquire))
         {
             g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
         }
+
         if (g_transmission_done)
         {
-            std::cout << "WSPR transmission complete.\n";
+            std::cout << "WSPR transmission complete." << std::endl;
         }
         else
         {
-            std::cout << "Interrupted. Aborting WSPR transmission.\n";
+            std::cout << "Interrupted. Aborting WSPR transmission." << std::endl;
         }
+        std::cout << "Elapsed time: "
+                  << std::fixed << std::setprecision(3)
+                  << elapsed.count() << " seconds." << std::endl;
     }
     else
     {
-        // Tone mode: stop on spacebar
-        std::cout << "Press <spacebar> to end test tone.\n";
+        // Tone mode: Stop on spacebar
+        std::cout << "Press <spacebar> to end test tone." << std::endl;
         wait_for_space_or_signal();
-        std::cout << "Test tone stopped.\n";
+        std::cout << "Test tone stopped." << std::endl;
     }
 
     // Teardown

@@ -300,11 +300,16 @@ void WsprTransmitter::setupTransmission(
     // Optional debug output
     if (debug)
     {
-        std::cout << std::setprecision(30)
-                  << "[DEBUG WsprTransmitter] dma_table_freq[0] = " << trans_params_.dma_table_freq[0] << std::endl
-                  << "[DEBUG WsprTransmitter] dma_table_freq[1] = " << trans_params_.dma_table_freq[1] << std::endl
-                  << "[DEBUG WsprTransmitter] dma_table_freq[2] = " << trans_params_.dma_table_freq[2] << std::endl
-                  << "[DEBUG WsprTransmitter] dma_table_freq[3] = " << trans_params_.dma_table_freq[3] << std::endl;
+        std::cout << std::fixed << std::setprecision(10)
+                  << "[DEBUG WsprTransmitter] dma_table_freq[0] = "
+                  << (trans_params_.dma_table_freq[0] * 1e-6) << " MHz\n"
+                  << "[DEBUG WsprTransmitter] dma_table_freq[1] = "
+                  << (trans_params_.dma_table_freq[1] * 1e-6) << " MHz\n"
+                  << "[DEBUG WsprTransmitter] dma_table_freq[2] = "
+                  << (trans_params_.dma_table_freq[2] * 1e-6) << " MHz\n"
+                  << "[DEBUG WsprTransmitter] dma_table_freq[3] = "
+                  << (trans_params_.dma_table_freq[3] * 1e-6) << " MHz"
+                  << std::endl;
     }
 }
 
