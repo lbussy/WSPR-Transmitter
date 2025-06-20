@@ -78,11 +78,11 @@ namespace
      *
      * @throws std::runtime_error on any mailbox or mapping failure.
      */
-    // TODO:  Review for 64-bit safety
     class MailboxMemoryPool
     {
         size_t total_size_;
-        unsigned mem_ref_, bus_addr_;
+        uint32_t mem_ref_;
+        std::uintptr_t bus_addr_;
         volatile uint8_t *virt_addr_;
 
     public:
@@ -132,9 +132,7 @@ namespace
         /** @return Virtual base pointer for the DMA pages. */
         volatile uint8_t *virt() const { return virt_addr_; }
         /** @return Bus address of the first DMA page. */
-        unsigned bus() const { return bus_addr_; }
-        /** @return Total size of the mapped region, in bytes. */
-        size_t size() const { return total_size_; }
+        std::uintptr_t bus() const { return bus_addr_; }
     };
 
 } // end anonymous namespace

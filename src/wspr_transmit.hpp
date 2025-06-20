@@ -35,7 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdint>        // for std::uint32_t, etc.
+#include <cstdint> // for std::uint32_t, etc.
 #include <functional>
 #include <mutex>
 #include <string>
@@ -44,7 +44,7 @@
 #include <vector>
 
 // POSIX/System headers
-#include <sys/time.h>     // for struct timeval
+#include <sys/time.h> // for struct timeval
 
 /**
  * @class WsprTransmitter
@@ -333,7 +333,7 @@ private:
     struct PageInfo
     {
         std::uintptr_t b; ///< Bus address.
-        void *v; ///< Virtual address.
+        void *v;          ///< Virtual address.
     };
 
     /**
@@ -560,13 +560,13 @@ private:
         double plld_nominal_freq;                  ///< PLLD clock frequency in Hz before any PPM correction.
         double plld_clock_frequency;               ///< PLLD clock frequency in Hz after PPM correction.
         volatile uint8_t *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
-        uint32_t orig_gp0ctl;      ///< Saved GP0CTL register (clock control).
-        uint32_t orig_gp0div;      ///< Saved GP0DIV register (clock divider).
-        uint32_t orig_pwm_ctl;     ///< Saved PWM control register.
-        uint32_t orig_pwm_sta;     ///< Saved PWM status register.
-        uint32_t orig_pwm_rng1;    ///< Saved PWM range register 1.
-        uint32_t orig_pwm_rng2;    ///< Saved PWM range register 2.
-        uint32_t orig_pwm_fifocfg; ///< Saved PWM FIFO configuration register.
+        uint32_t orig_gp0ctl;                      ///< Saved GP0CTL register (clock control).
+        uint32_t orig_gp0div;                      ///< Saved GP0DIV register (clock divider).
+        uint32_t orig_pwm_ctl;                     ///< Saved PWM control register.
+        uint32_t orig_pwm_sta;                     ///< Saved PWM status register.
+        uint32_t orig_pwm_rng1;                    ///< Saved PWM range register 1.
+        uint32_t orig_pwm_rng2;                    ///< Saved PWM range register 2.
+        uint32_t orig_pwm_fifocfg;                 ///< Saved PWM FIFO configuration register.
 
         /**
          * @brief Construct a new DMAConfig with default (nominal) settings.
@@ -598,32 +598,13 @@ private:
      */
     struct DMAConfig dma_config_;
 
-    /**
-     * @brief Global mailbox structure for Broadcom mailbox communication.
-     *
-     * This static structure stores information related to the Broadcom mailbox interface,
-     * which is used for allocating, locking, and mapping physical memory for DMA operations.
-     * It is declared as a file-scope static variable so that exit handlers and other parts
-     * of the program can access its members.
-     *
-     * @var mailbox_struct_::mem_ref
-     *      Memory reference returned by mem_alloc(), identifying the allocated memory block.
-     * @var mailbox_struct_::bus_addr
-     *      Bus address of the allocated memory, obtained from mem_lock().
-     * @var mailbox_struct_::virt_addr
-     *      Virtual address mapped to the allocated physical memory via mapmem().
-     * @var mailbox_struct_::pool_size
-     *      The total number of memory pages allocated in the pool.
-     * @var mailbox_struct_::pool_cnt
-     *      The count of memory pages that have been allocated from the pool so far.
-     */
     struct MailboxStruct
     {
-        unsigned mem_ref = 0;  ///< mem_alloc()
-        unsigned bus_addr = 0; ///< mem_lock()
-        volatile uint8_t *virt_addr = nullptr;
-        unsigned pool_size = 0; ///< total DMA pages
-        unsigned pool_cnt = 0;  ///< pages handed out
+        uint32_t mem_ref = 0;                  ///< mem_alloc()
+        std::uintptr_t bus_addr = 0;           ///< mem_lock()
+        volatile uint8_t *virt_addr = nullptr; ///< mapmem()
+        unsigned pool_size = 0;                ///< total DMA pages
+        unsigned pool_cnt = 0;                 ///< pages handed out
     };
 
     /**

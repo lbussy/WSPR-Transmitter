@@ -6,6 +6,8 @@ DEBUG := -DDEBUG_WSPR_TRANSMIT
 CXXVER := 17
 # Prefix for executing tests, "sudo" if required
 SUDO := sudo
+# INI file path
+INI := /usr/local/etc/wspr.ini
 # Add any required submodules by their src path
 SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Message/src)
 SUBMODULE_SRCDIRS += $(wildcard ../../Broadcom-Mailbox/src)
@@ -210,10 +212,10 @@ debug: build/bin/$(TEST_OUT)
 	$(Q)echo "Debug build completed successfully."
 
 test: debug
-	$(Q)$(SUDO) ./build/bin/$(TEST_OUT) -i /usr/local/etc/wspr.ini
+	$(Q)$(SUDO) ./build/bin/$(TEST_OUT) -i $(INI)
 
 gdb: debug
-	$(Q)$(SUDO) sudo gdb --args ./build/bin/$(TEST_OUT) -i /usr/local/etc/wspr.ini
+	$(Q)$(SUDO) sudo gdb --args ./build/bin/$(TEST_OUT) -i $(INI)
 
 lint:
 	$(Q)command -v cppcheck >/dev/null 2>&1 || { \
