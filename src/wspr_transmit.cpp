@@ -105,7 +105,7 @@ namespace
                 throw std::runtime_error("MailboxMemoryPool: mem_lock failed");
             }
             // Map
-            auto phys = static_cast<off_t>(bus_addr_ & ~0xC0000000UL);
+            auto phys = static_cast<off_t>(Mailbox::bus_to_physical(bus_addr_));
             virt_addr_ = mailbox.mapmem(phys, total_size_);
             if (!virt_addr_)
             {
@@ -838,7 +838,7 @@ void WsprTransmitter::set_thread_priority()
 inline volatile int &WsprTransmitter::access_bus_address(std::uintptr_t bus_addr)
 {
     // Compute byte‐offset from the bus address
-    std::uintptr_t offset = bus_addr - Mailbox::PERIPH_BUS_BASE;
+    std::uintptr_t offset = Mailbox::offset_from_base(bus_addr);
 
     // Add the offset, then cast to a volatile‐int pointer and dereference.
     return *reinterpret_cast<volatile int *>(dma_config_.peripheral_base_virtual + offset);
