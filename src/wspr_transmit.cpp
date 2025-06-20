@@ -840,7 +840,7 @@ void WsprTransmitter::set_thread_priority()
 inline volatile int &WsprTransmitter::access_bus_address(std::uintptr_t bus_addr)
 {
     // Compute byte‐offset from the bus address
-    std::uintptr_t offset = bus_addr - 0x7E000000UL;
+    std::uintptr_t offset = bus_addr - Mailbox::PERIPH_BUS_BASE;
 
     // Add the offset, then cast to a volatile‐int pointer and dereference.
     return *reinterpret_cast<volatile int *>(dma_config_.peripheral_base_virtual + offset);
@@ -885,7 +885,7 @@ inline void WsprTransmitter::clear_bit_bus_address(std::uintptr_t base, unsigned
  */
 inline std::uintptr_t WsprTransmitter::bus_to_physical(std::uintptr_t x)
 {
-    return x & ~0xC0000000UL;
+    return x & ~Mailbox::BUS_FLAG_MASK;
 }
 
 /**
@@ -1522,7 +1522,7 @@ void WsprTransmitter::create_dma_pages(
     //
     // Compute the byte‐offset from the bus base (0x7E000000) to your desired
     // DMA register block (DMA_BUS_BASE).
-    std::uintptr_t delta = DMA_BUS_BASE - 0x7E000000UL;
+    std::uintptr_t delta = DMA_BUS_BASE - Mailbox::PERIPH_BUS_BASE;
 
     // Add the offset, then cast to your register pointer
     volatile uint8_t *dma_base = dma_config_.peripheral_base_virtual + delta;
