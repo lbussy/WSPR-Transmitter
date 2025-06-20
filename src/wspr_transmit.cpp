@@ -64,9 +64,7 @@ constexpr const bool debug = false;
 // Helper classes and functions in anonymous namespace
 namespace
 {
-    // We hard-code 4 KB page/block sizes here because the class’s PAGE_SIZE/BLOCK_SIZE are private.
-    static constexpr size_t kPageSize = 4 * 1024;
-    static constexpr size_t kBlockSize = 4 * 1024;
+    static constexpr size_t NUM_PAGES = 4096;
 
     /**
      * @brief RAII for a pool of DMA-capable pages allocated via mailbox.
@@ -92,11 +90,11 @@ namespace
          * @param numpages  Number of pages to allocate (1 const + N instr).
          */
         MailboxMemoryPool(unsigned numpages)
-            : total_size_(numpages * kPageSize),
+            : total_size_(numpages * Mailbox::PAGE_SIZE),
               mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
         {
             // Allocate
-            mem_ref_ = mailbox.mem_alloc(total_size_, kBlockSize);
+            mem_ref_ = mailbox.mem_alloc(total_size_, Mailbox::BLOCK_SIZE);
             if (!mem_ref_)
                 throw std::runtime_error("MailboxMemoryPool: mem_alloc failed");
             // Lock
@@ -721,7 +719,7 @@ void WsprTransmitter::dma_cleanup()
     // Unmap peripheral region if mapped
     if (dma_config_.peripheral_base_virtual)
     {
-        ::mailbox.unmapmem(dma_config_.peripheral_base_virtual, kPageSize * 4096);
+        ::mailbox.unmapmem(dma_config_.peripheral_base_virtual, Mailbox::PAGE_SIZE * NUM_PAGES);
         dma_config_.peripheral_base_virtual = nullptr;
     }
 
@@ -1019,8 +1017,8 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 {
     // Allocate a contiguous block of physical pages
     mailbox_struct_.mem_ref = mailbox.mem_alloc(
-        PAGE_SIZE * numpages,
-        BLOCK_SIZE);
+        Mailbox::PAGE_SIZE * numpages,
+        Mailbox::BLOCK_SIZE);
     if (mailbox_struct_.mem_ref == 0)
     {
         throw std::runtime_error("Error: mem_alloc failed.");
@@ -1035,7 +1033,7 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     }
 
     // Map the locked pages into user‑space virtual memory
-    mailbox_struct_.virt_addr = mailbox.mapmem(bus_to_physical(mailbox_struct_.bus_addr), PAGE_SIZE * numpages);
+    mailbox_struct_.virt_addr = mailbox.mapmem(bus_to_physical(mailbox_struct_.bus_addr), Mailbox::PAGE_SIZE * numpages);
     if (mailbox_struct_.virt_addr == nullptr)
     {
         mailbox.mem_unlock(mailbox_struct_.mem_ref);
@@ -1075,7 +1073,7 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
     }
 
     // Compute the offset for the next available page.
-    unsigned offset = mailbox_struct_.pool_cnt * PAGE_SIZE;
+    unsigned offset = mailbox_struct_.pool_cnt * Mailbox::PAGE_SIZE;
 
     // Retrieve the virtual and bus addresses based on the offset.
     *vAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.virt_addr) + offset);
@@ -1104,7 +1102,7 @@ void WsprTransmitter::deallocate_memory_pool()
     // Free virtual memory mapping if it was allocated.
     if (mailbox_struct_.virt_addr != nullptr)
     {
-        mailbox.unmapmem(mailbox_struct_.virt_addr, mailbox_struct_.pool_size * PAGE_SIZE);
+        mailbox.unmapmem(mailbox_struct_.virt_addr, mailbox_struct_.pool_size * Mailbox::PAGE_SIZE);
         mailbox_struct_.virt_addr = nullptr; // Prevent dangling pointer usage
     }
 
@@ -1456,7 +1454,7 @@ void WsprTransmitter::create_dma_pages(
         // Create DMA control blocks (CBs)
         struct CB *instr0 = reinterpret_cast<struct CB *>(instr_page_.v);
 
-        for (int i = 0; i < static_cast<int>(PAGE_SIZE / sizeof(struct CB)); i++)
+        for (int i = 0; i < static_cast<int>(Mailbox::PAGE_SIZE / sizeof(struct CB)); i++)
         {
             // Assign virtual and bus addresses for each instruction
             instructions_[instrCnt].v = static_cast<void *>(static_cast<char *>(instr_page_.v) + sizeof(struct CB) * i);
@@ -1561,7 +1559,7 @@ void WsprTransmitter::setup_dma()
 
     // Map peripherals via mailbox.mapmem()
     uint32_t base = Mailbox::discover_peripheral_base();
-    dma_config_.peripheral_base_virtual = ::mailbox.mapmem(base, kPageSize * 4096 /*=0x01000000*/);
+    dma_config_.peripheral_base_virtual = ::mailbox.mapmem(base, Mailbox::PAGE_SIZE * NUM_PAGES /*=0x01000000*/);
 
     // Snapshot regs
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);

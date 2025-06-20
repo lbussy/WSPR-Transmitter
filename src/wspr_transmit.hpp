@@ -464,24 +464,6 @@ private:
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
 
     /**
-     * @brief The size of a memory page in bytes.
-     *
-     * Defines the standard memory page size used for memory-mapped I/O operations.
-     * This value is typically 4 KB (4096 bytes) on most systems, aligning with the
-     * memory management unit (MMU) requirements.
-     */
-    static constexpr std::uint32_t PAGE_SIZE = 4 * 1024;
-
-    /**
-     * @brief The size of a memory block in bytes.
-     *
-     * Defines the standard block size for memory operations, used in memory-mapped
-     * peripheral access and buffer allocation. This value matches `PAGE_SIZE` to
-     * ensure proper memory alignment when mapping hardware registers.
-     */
-    static constexpr std::uint32_t BLOCK_SIZE = 4 * 1024;
-
-    /**
      * @brief The nominal number of PWM clock cycles per iteration.
      *
      * This constant defines the expected number of PWM clock cycles required for
