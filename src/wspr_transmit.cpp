@@ -871,20 +871,6 @@ inline void WsprTransmitter::clear_bit_bus_address(std::uintptr_t base, unsigned
 }
 
 /**
- * @brief Converts a bus address to a physical address.
- *
- * This function converts a given bus address into the corresponding physical address by
- * masking out the upper bits (0xC0000000) that are not part of the physical address.
- *
- * @param x The bus address.
- * @return The physical address obtained from the bus address.
- */
-inline std::uintptr_t WsprTransmitter::bus_to_physical(std::uintptr_t x)
-{
-    return x & ~Mailbox::BUS_FLAG_MASK;
-}
-
-/**
  * @brief Computes the difference between two time values.
  * @details Calculates `t2 - t1` and stores the result in `result`. If `t2 < t1`,
  *          the function returns `1`, otherwise, it returns `0`.
@@ -1031,7 +1017,7 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     }
 
     // Map the locked pages into user‑space virtual memory
-    mailbox_struct_.virt_addr = mailbox.mapmem(bus_to_physical(mailbox_struct_.bus_addr), Mailbox::PAGE_SIZE * numpages);
+    mailbox_struct_.virt_addr = mailbox.mapmem(mailbox.bus_to_physical(mailbox_struct_.bus_addr), Mailbox::PAGE_SIZE * numpages);
     if (mailbox_struct_.virt_addr == nullptr)
     {
         mailbox.mem_unlock(mailbox_struct_.mem_ref);
