@@ -1389,7 +1389,7 @@ double WsprTransmitter::bit_trunc(const double &d, const int &lsb)
 void WsprTransmitter::open_mbox()
 {
     // Open the mailbox
-    mailbox.mbox_open();
+    mailbox.open();
 }
 
 /**
