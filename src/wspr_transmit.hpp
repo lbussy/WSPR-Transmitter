@@ -600,9 +600,9 @@ private:
 
     struct MailboxStruct
     {
-        uint32_t mem_ref = 0;                  ///< mem_alloc()
-        std::uintptr_t bus_addr = 0;           ///< mem_lock()
-        volatile uint8_t *virt_addr = nullptr; ///< mapmem()
+        uint32_t mem_ref = 0;                  ///< memAlloc()
+        std::uintptr_t bus_addr = 0;           ///< memLock()
+        volatile uint8_t *virt_addr = nullptr; ///< mapMem()
         unsigned pool_size = 0;                ///< total DMA pages
         unsigned pool_cnt = 0;                 ///< pages handed out
     };
@@ -610,8 +610,8 @@ private:
     /**
      * @brief MailboxStruct state for DMA memory management.
      *
-     * This member holds the memory reference ID (from mem_alloc()), the bus
-     * address (from mem_lock()), the virtual address pointer (from mapmem()),
+     * This member holds the memory reference ID (from memAlloc()), the bus
+     * address (from memLock()), the virtual address pointer (from mapMem()),
      * and the pool parameters for page allocation.
      */
     MailboxStruct mailbox_struct_;

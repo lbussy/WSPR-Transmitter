@@ -70,9 +70,9 @@ namespace
      * @brief RAII for a pool of DMA-capable pages allocated via mailbox.
      *
      * On construction:
-     *   1. Calls `mem_alloc()` for `numpages`.
-     *   2. Calls `mem_lock()` to get the bus address.
-     *   3. Calls `mapmem()` to map into user space.
+     *   1. Calls `memAlloc()` for `numpages`.
+     *   2. Calls `memLock()` to get the bus address.
+     *   3. Calls `mapMem()` to map into user space.
      *
      * On destruction: unmaps, unlocks, and frees the pages automatically.
      *
@@ -94,24 +94,24 @@ namespace
               mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
         {
             // Allocate
-            mem_ref_ = mailbox.mem_alloc(total_size_, Mailbox::BLOCK_SIZE);
+            mem_ref_ = mailbox.memAlloc(total_size_, Mailbox::BLOCK_SIZE);
             if (!mem_ref_)
-                throw std::runtime_error("MailboxMemoryPool: mem_alloc failed");
+                throw std::runtime_error("MailboxMemoryPool: memAlloc failed");
             // Lock
-            bus_addr_ = mailbox.mem_lock(mem_ref_);
+            bus_addr_ = mailbox.memLock(mem_ref_);
             if (!bus_addr_)
             {
-                mailbox.mem_free(mem_ref_);
-                throw std::runtime_error("MailboxMemoryPool: mem_lock failed");
+                mailbox.memFree(mem_ref_);
+                throw std::runtime_error("MailboxMemoryPool: memLock failed");
             }
             // Map
-            auto phys = static_cast<off_t>(Mailbox::bus_to_physical(bus_addr_));
-            virt_addr_ = mailbox.mapmem(phys, total_size_);
+            auto phys = static_cast<off_t>(Mailbox::busToPhysical(bus_addr_));
+            virt_addr_ = mailbox.mapMem(phys, total_size_);
             if (!virt_addr_)
             {
-                mailbox.mem_unlock(mem_ref_);
-                mailbox.mem_free(mem_ref_);
-                throw std::runtime_error("MailboxMemoryPool: mapmem failed");
+                mailbox.memUnlock(mem_ref_);
+                mailbox.memFree(mem_ref_);
+                throw std::runtime_error("MailboxMemoryPool: mapMem failed");
             }
         }
 
@@ -120,12 +120,12 @@ namespace
         {
             if (virt_addr_)
             {
-                mailbox.unmapmem(virt_addr_, total_size_);
+                mailbox.unMapMem(virt_addr_, total_size_);
             }
             if (bus_addr_)
             {
-                mailbox.mem_unlock(mem_ref_);
-                mailbox.mem_free(mem_ref_);
+                mailbox.memUnlock(mem_ref_);
+                mailbox.memFree(mem_ref_);
             }
         }
 
@@ -717,7 +717,7 @@ void WsprTransmitter::dma_cleanup()
     // Unmap peripheral region if mapped
     if (dma_config_.peripheral_base_virtual)
     {
-        ::mailbox.unmapmem(dma_config_.peripheral_base_virtual, Mailbox::PAGE_SIZE * NUM_PAGES);
+        ::mailbox.unMapMem(dma_config_.peripheral_base_virtual, Mailbox::PAGE_SIZE * NUM_PAGES);
         dma_config_.peripheral_base_virtual = nullptr;
     }
 
@@ -725,7 +725,7 @@ void WsprTransmitter::dma_cleanup()
     deallocate_memory_pool();
 
     // Close mailbox if open
-    mailbox.mbox_close();
+    mailbox.close();
 
     // Reset global configuration structures to defaults
     dma_config_ = DMAConfig();         // Uses your in-class initializers
@@ -836,7 +836,7 @@ void WsprTransmitter::set_thread_priority()
 inline volatile int &WsprTransmitter::access_bus_address(std::uintptr_t bus_addr)
 {
     // Compute byte‐offset from the bus address
-    std::uintptr_t offset = Mailbox::offset_from_base(bus_addr);
+    std::uintptr_t offset = Mailbox::offsetFromBase(bus_addr);
 
     // Add the offset, then cast to a volatile‐int pointer and dereference.
     return *reinterpret_cast<volatile int *>(dma_config_.peripheral_base_virtual + offset);
@@ -1000,29 +1000,29 @@ void WsprTransmitter::get_plld()
 void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 {
     // Allocate a contiguous block of physical pages
-    mailbox_struct_.mem_ref = mailbox.mem_alloc(
+    mailbox_struct_.mem_ref = mailbox.memAlloc(
         Mailbox::PAGE_SIZE * numpages,
         Mailbox::BLOCK_SIZE);
     if (mailbox_struct_.mem_ref == 0)
     {
-        throw std::runtime_error("Error: mem_alloc failed.");
+        throw std::runtime_error("Error: memAlloc failed.");
     }
 
     // Lock the block to obtain its bus address
-    mailbox_struct_.bus_addr = mailbox.mem_lock(mailbox_struct_.mem_ref);
+    mailbox_struct_.bus_addr = mailbox.memLock(mailbox_struct_.mem_ref);
     if (mailbox_struct_.bus_addr == 0)
     {
-        mailbox.mem_free(mailbox_struct_.mem_ref);
-        throw std::runtime_error("Error: mem_lock failed.");
+        mailbox.memFree(mailbox_struct_.mem_ref);
+        throw std::runtime_error("Error: memLock failed.");
     }
 
     // Map the locked pages into user‑space virtual memory
-    mailbox_struct_.virt_addr = mailbox.mapmem(mailbox.bus_to_physical(mailbox_struct_.bus_addr), Mailbox::PAGE_SIZE * numpages);
+    mailbox_struct_.virt_addr = mailbox.mapMem(mailbox.busToPhysical(mailbox_struct_.bus_addr), Mailbox::PAGE_SIZE * numpages);
     if (mailbox_struct_.virt_addr == nullptr)
     {
-        mailbox.mem_unlock(mailbox_struct_.mem_ref);
-        mailbox.mem_free(mailbox_struct_.mem_ref);
-        throw std::runtime_error("Error: mapmem failed.");
+        mailbox.memUnlock(mailbox_struct_.mem_ref);
+        mailbox.memFree(mailbox_struct_.mem_ref);
+        throw std::runtime_error("Error: mapMem failed.");
     }
 
     // Record pool parameters
@@ -1086,15 +1086,15 @@ void WsprTransmitter::deallocate_memory_pool()
     // Free virtual memory mapping if it was allocated.
     if (mailbox_struct_.virt_addr != nullptr)
     {
-        mailbox.unmapmem(mailbox_struct_.virt_addr, mailbox_struct_.pool_size * Mailbox::PAGE_SIZE);
+        mailbox.unMapMem(mailbox_struct_.virt_addr, mailbox_struct_.pool_size * Mailbox::PAGE_SIZE);
         mailbox_struct_.virt_addr = nullptr; // Prevent dangling pointer usage
     }
 
     // Free the allocated memory block if it was successfully allocated.
     if (mailbox_struct_.mem_ref != 0)
     {
-        mailbox.mem_unlock(mailbox_struct_.mem_ref);
-        mailbox.mem_free(mailbox_struct_.mem_ref);
+        mailbox.memUnlock(mailbox_struct_.mem_ref);
+        mailbox.memFree(mailbox_struct_.mem_ref);
         mailbox_struct_.mem_ref = 0; // Ensure it does not reference a freed block
     }
 
@@ -1541,9 +1541,9 @@ void WsprTransmitter::setup_dma()
     // PLLD & mem-flag
     get_plld();
 
-    // Map peripherals via mailbox.mapmem()
-    uint32_t base = Mailbox::discover_peripheral_base();
-    dma_config_.peripheral_base_virtual = ::mailbox.mapmem(base, Mailbox::PAGE_SIZE * NUM_PAGES /*=0x01000000*/);
+    // Map peripherals via mailbox.mapMem()
+    uint32_t base = Mailbox::discoverPeripheralBase();
+    dma_config_.peripheral_base_virtual = ::mailbox.mapMem(base, Mailbox::PAGE_SIZE * NUM_PAGES /*=0x01000000*/);
 
     // Snapshot regs
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
