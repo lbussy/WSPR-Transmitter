@@ -27,32 +27,24 @@
 #ifndef _WSPR_TRANSMIT_HPP
 #define _WSPR_TRANSMIT_HPP
 
+// Project header
 #include "wspr_message.hpp"
 
-#include <array>              // std::array
-#include <atomic>             // std::atomic
-#include <chrono>             // std::chrono in TransmissionScheduler
-#include <condition_variable> // std::condition_variable
-#include <functional>         // std::function
-#include <mutex>              // std::mutex
-#include <string>             // std::string
-#include <thread>             // std::thread
-#include <variant>            // std::variant
-#include <vector>             // std::vector
+// C++ Standard Library
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint> // for std::uint32_t, etc.
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <variant>
+#include <vector>
 
-/**
- * @enum WsprMode
- * @brief Specifies the WSPR mode for the frequency.
- *
- * This enumeration defines the available modes for operation.
- * - `WSPR2`: Indicates a standard (2-minute) transmission.
- * - `WSPR15`: Indicates a slow (15-minute) transmission.
- */
-enum class WsprMode
-{
-    WSPR2, ///< WSPR transmission mode
-    WSPR15 ///< Test tone generation mode
-};
+// POSIX/System headers
+#include <sys/time.h> // for struct timeval
 
 /**
  * @class WsprTransmitter
@@ -246,18 +238,6 @@ public:
      */
     void printParameters();
 
-    /**
-     * @brief Determine if a frequency falls within any WSPR-15 band.
-     *
-     * @param freq  Frequency in Hz to test.
-     * @return `true` if `freq` lies strictly between the low and high edges
-     *         of any WSPR-15 range, `false` otherwise.
-     *
-     * @note The check is exclusive (`lo < freq < hi`). If you need inclusive
-     *       bounds, change to `lo <= freq && freq <= hi`.
-     */
-    bool inWspr15Band(double freq) noexcept;
-
 private:
     /**
      * @brief Invoked just before each transmission begins.
@@ -352,8 +332,8 @@ private:
      */
     struct PageInfo
     {
-        void *b; ///< Bus address.
-        void *v; ///< Virtual address.
+        std::uintptr_t b; ///< Bus address.
+        void *v;          ///< Virtual address.
     };
 
     /**
@@ -398,22 +378,6 @@ private:
      * @see WSPR15_RAND_OFFSET
      */
     static constexpr int WSPR_RAND_OFFSET = 80;
-
-    /**
-     * @brief Random frequency offset for WSPR-15 transmissions.
-     *
-     * This constant defines the range, in Hertz, for random frequency offsets
-     * applied to WSPR-15 transmissions. The offset is applied symmetrically
-     * around the target frequency, resulting in a random variation of ±8 Hz.
-     *
-     * This ensures that WSPR-15 transmissions remain within the allocated band
-     * while introducing slight variations to minimize signal collisions.
-     *
-     * @note This offset is specific to WSPR-15 transmissions (15-minute cycles).
-     *
-     * @see WSPR_RAND_OFFSET
-     */
-    static constexpr int WSPR15_RAND_OFFSET = 8;
 
     /**
      * @brief Nominal symbol duration for WSPR transmissions.
@@ -500,24 +464,6 @@ private:
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
 
     /**
-     * @brief The size of a memory page in bytes.
-     *
-     * Defines the standard memory page size used for memory-mapped I/O operations.
-     * This value is typically 4 KB (4096 bytes) on most systems, aligning with the
-     * memory management unit (MMU) requirements.
-     */
-    static constexpr std::uint32_t PAGE_SIZE = 4 * 1024;
-
-    /**
-     * @brief The size of a memory block in bytes.
-     *
-     * Defines the standard block size for memory operations, used in memory-mapped
-     * peripheral access and buffer allocation. This value matches `PAGE_SIZE` to
-     * ensure proper memory alignment when mapping hardware registers.
-     */
-    static constexpr std::uint32_t BLOCK_SIZE = 4 * 1024;
-
-    /**
      * @brief The nominal number of PWM clock cycles per iteration.
      *
      * This constant defines the expected number of PWM clock cycles required for
@@ -525,34 +471,6 @@ private:
      * value to maintain precise timing in signal generation.
      */
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
-
-    /**
-     * @brief Processor ID for the Broadcom BCM2835 chip.
-     *
-     * This constant identifies the BCM2835 processor, which is used in the original Raspberry Pi (RPi1).
-     */
-    static constexpr int BCM_HOST_PROCESSOR_BCM2835 = 0; // BCM2835 (RPi1)
-
-    /**
-     * @brief Processor ID for the Broadcom BCM2836 chip.
-     *
-     * This constant identifies the BCM2836 processor, which is used in the Raspberry Pi 2 (RPi2).
-     */
-    static constexpr int BCM_HOST_PROCESSOR_BCM2836 = 1; // BCM2836 (RPi2)
-
-    /**
-     * @brief Processor ID for the Broadcom BCM2837 chip.
-     *
-     * This constant identifies the BCM2837 processor, which is used in the Raspberry Pi 3 (RPi3).
-     */
-    static constexpr int BCM_HOST_PROCESSOR_BCM2837 = 2; // BCM2837 (RPi3)
-
-    /**
-     * @brief Processor ID for the Broadcom BCM2711 chip.
-     *
-     * This constant identifies the BCM2711 processor, which is used in the Raspberry Pi 4 (RPi4).
-     */
-    static constexpr int BCM_HOST_PROCESSOR_BCM2711 = 3; // BCM2711 (RPi4)
 
     /**
      * @brief Drive strength lookup table for GPIO output levels.
@@ -597,7 +515,6 @@ private:
         double ppm;                         ///< Current system PPM adjustment
         bool is_tone;                       ///< Is test tone
         int power;                          ///< GPIO power level 0-7
-        WsprMode wspr_mode;                 ///< WSPR mode for the frequency.
         double symtime;                     ///< Duration of each symbol in seconds.
         double tone_spacing;                ///< Frequency spacing between adjacent tones in Hz.
         std::vector<double> dma_table_freq; ///< DMA frequency lookup table.
@@ -613,7 +530,6 @@ private:
               frequency(0.0),
               is_tone(false),
               power(0),
-              wspr_mode(WsprMode::WSPR2),
               symtime(0.0),
               tone_spacing(0.0),
               dma_table_freq(1024, 0.0),
@@ -641,18 +557,16 @@ private:
      */
     struct DMAConfig
     {
-        double plld_nominal_freq;      ///< PLLD clock frequency in Hz before any PPM correction.
-        double plld_clock_frequency;   ///< PLLD clock frequency in Hz after PPM correction.
-        int mem_flag;                  ///< Mailbox memory allocation flags for DMA.
-        void *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
-        size_t peripheral_map_size;
-        uint32_t orig_gp0ctl;      ///< Saved GP0CTL register (clock control).
-        uint32_t orig_gp0div;      ///< Saved GP0DIV register (clock divider).
-        uint32_t orig_pwm_ctl;     ///< Saved PWM control register.
-        uint32_t orig_pwm_sta;     ///< Saved PWM status register.
-        uint32_t orig_pwm_rng1;    ///< Saved PWM range register 1.
-        uint32_t orig_pwm_rng2;    ///< Saved PWM range register 2.
-        uint32_t orig_pwm_fifocfg; ///< Saved PWM FIFO configuration register.
+        double plld_nominal_freq;                  ///< PLLD clock frequency in Hz before any PPM correction.
+        double plld_clock_frequency;               ///< PLLD clock frequency in Hz after PPM correction.
+        volatile uint8_t *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
+        uint32_t orig_gp0ctl;                      ///< Saved GP0CTL register (clock control).
+        uint32_t orig_gp0div;                      ///< Saved GP0DIV register (clock divider).
+        uint32_t orig_pwm_ctl;                     ///< Saved PWM control register.
+        uint32_t orig_pwm_sta;                     ///< Saved PWM status register.
+        uint32_t orig_pwm_rng1;                    ///< Saved PWM range register 1.
+        uint32_t orig_pwm_rng2;                    ///< Saved PWM range register 2.
+        uint32_t orig_pwm_fifocfg;                 ///< Saved PWM FIFO configuration register.
 
         /**
          * @brief Construct a new DMAConfig with default (nominal) settings.
@@ -660,15 +574,12 @@ private:
          * @details Initializes:
          *   - `plld_nominal_freq` to 500 MHz with the built‑in 2.5 ppm correction.
          *   - `plld_clock_frequency` equal to `plld_nominal_freq`.
-         *   - `mem_flag` to the default mailbox flag.
          *   - All pointers and saved‑register fields to zero or nullptr.
          */
         DMAConfig()
             : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
               plld_clock_frequency(plld_nominal_freq),
-              mem_flag(0x0c),
               peripheral_base_virtual(nullptr),
-              peripheral_map_size{0},
               orig_gp0ctl(0),
               orig_gp0div(0),
               orig_pwm_ctl(0),
@@ -687,46 +598,23 @@ private:
      */
     struct DMAConfig dma_config_;
 
-    /**
-     * @brief Global mailbox structure for Broadcom mailbox communication.
-     *
-     * This static structure stores information related to the Broadcom mailbox interface,
-     * which is used for allocating, locking, and mapping physical memory for DMA operations.
-     * It is declared as a file-scope static variable so that exit handlers and other parts
-     * of the program can access its members.
-     *
-     * @var mailbox_::handle
-     *      Mailbox handle obtained from mbox_open(), used for communication with the mailbox.
-     * @var mailbox_::mem_ref
-     *      Memory reference returned by mem_alloc(), identifying the allocated memory block.
-     * @var mailbox_::bus_addr
-     *      Bus address of the allocated memory, obtained from mem_lock().
-     * @var mailbox_::virt_addr
-     *      Virtual address mapped to the allocated physical memory via mapmem().
-     * @var mailbox_::pool_size
-     *      The total number of memory pages allocated in the pool.
-     * @var mailbox_::pool_cnt
-     *      The count of memory pages that have been allocated from the pool so far.
-     */
-    struct Mailbox
+    struct MailboxStruct
     {
-        int handle = -1;       ///< mailbox fd
-        unsigned mem_ref = 0;  ///< mem_alloc()
-        unsigned bus_addr = 0; ///< mem_lock()
-        unsigned char *virt_addr = nullptr;
-        unsigned pool_size = 0; ///< total DMA pages
-        unsigned pool_cnt = 0;  ///< pages handed out
+        uint32_t mem_ref = 0;                  ///< mem_alloc()
+        std::uintptr_t bus_addr = 0;           ///< mem_lock()
+        volatile uint8_t *virt_addr = nullptr; ///< mapmem()
+        unsigned pool_size = 0;                ///< total DMA pages
+        unsigned pool_cnt = 0;                 ///< pages handed out
     };
 
     /**
-     * @brief Mailbox state for DMA memory management.
+     * @brief MailboxStruct state for DMA memory management.
      *
-     * This member holds the mailbox handle (from mbox_open()), the memory
-     * reference ID (from mem_alloc()), the bus address (from mem_lock()),
-     * the virtual address pointer (from mapmem()), and the pool parameters
-     * for page allocation.
+     * This member holds the memory reference ID (from mem_alloc()), the bus
+     * address (from mem_lock()), the virtual address pointer (from mapmem()),
+     * and the pool parameters for page allocation.
      */
-    Mailbox mailbox_;
+    MailboxStruct mailbox_struct_;
 
     /**
      * @brief Control Block (CB) structure for DMA engine commands.
@@ -884,7 +772,7 @@ private:
      *   4. Reset the DMA controller.
      *   5. Unmap the peripheral base address region.
      *   6. Deallocate mailbox memory pages.
-     *   7. Close the mailbox handle.
+     *   7. Close the mailbox.
      *   8. Remove the local device file.
      *   9. Reset all configuration data to defaults.
      *
@@ -949,17 +837,6 @@ private:
     inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
 
     /**
-     * @brief Converts a bus address to a physical address.
-     *
-     * This function converts a given bus address into the corresponding physical address by
-     * masking out the upper bits (0xC0000000) that are not part of the physical address.
-     *
-     * @param x The bus address.
-     * @return The physical address obtained from the bus address.
-     */
-    inline std::uintptr_t bus_to_physical(std::uintptr_t x);
-
-    /**
      * @brief Computes the difference between two time values.
      * @details Calculates `t2 - t1` and stores the result in `result`. If `t2 < t1`,
      *          the function returns `1`, otherwise, it returns `0`.
@@ -972,21 +849,20 @@ private:
     int symbol_timeval_subtract(struct timeval *result, const struct timeval *t2, const struct timeval *t1);
 
     /**
-     * @brief Initialize DMAConfig PLLD frequencies and mailbox memory flag.
+     * @brief Initialize DMAConfig PLLD frequencies
      *
      * @details
      *   1. Reads the Raspberry Pi hardware revision from `/proc/cpuinfo` (cached
      *      after first read).
      *   2. Determines the processor ID (BCM2835, BCM2836/37, or BCM2711).
-     *   3. Sets `dma_config_.mem_flag` to the correct mailbox allocation flag.
-     *   4. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
+     *   3. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
      *      frequency (500 MHz for Pi 1/2/3, 750 MHz for Pi 4).
-     *   5. Initializes `dma_config_.plld_clock_frequency` equal to
+     *   4. Initializes `dma_config_.plld_clock_frequency` equal to
      *      `plld_nominal_freq` (zero PPM correction).
      *
      * @throws std::runtime_error if the processor ID is unrecognized.
      */
-    void get_plld_and_memflag();
+    void get_plld();
 
     /**
      * @brief Allocate a pool of DMA‑capable memory pages.
@@ -1082,15 +958,6 @@ private:
     void open_mbox();
 
     /**
-     * @brief Safely removes a file if it exists.
-     * @details Checks whether the specified file exists before attempting to remove it.
-     *          If the file exists but removal fails, a warning is displayed.
-     *
-     * @param[in] filename Pointer to a null-terminated string containing the file path.
-     */
-    void safe_remove();
-
-    /**
      * @brief Configures and initializes DMA for PWM signal generation.
      * @details Allocates memory pages, creates DMA control blocks, sets up a
      *          circular inked list of DMA instructions, and configures the
@@ -1110,7 +977,7 @@ private:
      * @brief Configure and initialize the DMA system for WSPR transmission.
      *
      * @details Performs the following steps in order:
-     *   1. Retrieve and configure the PLLD clock frequency and DMA memory flag.
+     *   1. Retrieve and configure the PLLD clock frequency.
      *   2. Map the peripheral base address into user space.
      *   3. Save the original clock and PWM register values for later restoration.
      *   4. Open the Broadcom mailbox interface for DMA memory allocation.
@@ -1209,10 +1076,8 @@ private:
             auto now = system_clock::now();
             auto secs = duration_cast<seconds>(now.time_since_epoch()).count();
 
-            // Choose cycle length: 2 min = 120 s or 15 min = 900 s
-            const int cycle = (parent_->trans_params_.wspr_mode == WsprMode::WSPR15)
-                                  ? 15 * 60
-                                  : 2 * 60;
+            // Choose cycle length: 2 min = 120 s
+            const int cycle = 2 * 60;
 
             // Integer‐divide to find current cycle index
             auto idx = secs / cycle;

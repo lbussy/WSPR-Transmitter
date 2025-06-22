@@ -28,10 +28,8 @@
 
 #include "wspr_message.hpp" // WsprMessage Submodule
 
-extern "C"
-{
-#include "mailbox.h" // Broadcom Mailbox Submodule
-}
+#include "mailbox.hpp" // Broadcom Mailbox Submodule
+#include "bcm_model.hpp"
 
 // C++ Standard Library Headers
 #include <algorithm> // std::copy_n, std::clamp
@@ -66,156 +64,7 @@ constexpr const bool debug = false;
 // Helper classes and functions in anonymous namespace
 namespace
 {
-    /**
-     * @brief Standard frequency ranges for WSPR-15 operation.
-     *
-     * @details Defines the three well-known WSPR-15 band edges (in Hertz)
-     *          as lower/upper pairs.  These constants are used to select
-     *          WSPR-15 mode automatically when the transmit frequency
-     *          lies within one of these intervals:
-     *            - 137 600 – 137 625 Hz
-     *            - 475 800 – 475 825 Hz
-     *            - 1 838 200 – 1 838 225 Hz
-     */
-    static constexpr std::array<std::pair<double, double>, 3> WSPR15_RANGES{{
-        {137600, 137625},
-        {475800, 475825},
-        {1838200, 1838225},
-    }};
-
-    /**
-     * @brief Read a 4-byte big-endian integer from a device-tree file.
-     *
-     * Attempts to open `file` in binary mode, seek to `off`, and read exactly 4 bytes.
-     * Returns std::nullopt on any I/O error.
-     *
-     * @param file Path to the device-tree property file.
-     * @param off  Byte offset within the file to begin reading.
-     * @return std::optional<uint32_t> The parsed 32-bit big-endian value, or nullopt.
-     */
-    static std::optional<uint32_t> read_dt_range(const std::string &file, size_t off)
-    {
-        std::ifstream f(file, std::ios::binary);
-        if (!f)
-            return std::nullopt;
-        f.seekg(off);
-        uint8_t buf[4];
-        if (f.read(reinterpret_cast<char *>(buf), sizeof(buf)))
-        {
-            return (uint32_t(buf[0]) << 24) | (uint32_t(buf[1]) << 16) | (uint32_t(buf[2]) << 8) | uint32_t(buf[3]);
-        }
-        return std::nullopt;
-    }
-
-    // We hard-code 4 KB page/block sizes here because the class’s PAGE_SIZE/BLOCK_SIZE are private.
-    static constexpr size_t kPageSize = 4 * 1024;
-    static constexpr size_t kBlockSize = 4 * 1024;
-
-    /**
-     * @brief RAII wrapper for a memory-mapped I/O region.
-     *
-     * Maps a physical address range via `/dev/mem` on construction and unmaps it
-     * on destruction (unless released). Throws on mmap failure.
-     *
-     * @note Use `release()` if you hand ownership of the mapping elsewhere.
-     */
-    class MMapRegion
-    {
-        void *ptr_;
-        size_t size_;
-
-    public:
-        /**
-         * @param fd     File descriptor for `/dev/mem` (must already be open).
-         * @param offset Physical address offset to map.
-         * @param size   Length of the region, in bytes.
-         * @throws std::runtime_error if `mmap` fails.
-         */
-        MMapRegion(int fd, off_t offset, size_t size)
-            : ptr_(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset)),
-              size_(size)
-        {
-            if (ptr_ == MAP_FAILED)
-            {
-                throw std::runtime_error("MMapRegion: mmap failed: " + std::string(std::strerror(errno)));
-            }
-        }
-
-        /** Unmap the region unless it has been released. */
-        ~MMapRegion()
-        {
-            if (ptr_)
-                munmap(ptr_, size_);
-        }
-
-        /** @return The mapped pointer. */
-        void *get() const { return ptr_; }
-        /**
-         * @brief Release ownership so the destructor won’t unmap.
-         *
-         * Call after moving `ptr_` into another owner (e.g. storing
-         * in `dma_config_.peripheral_base_virtual`).
-         */
-        void release() { ptr_ = nullptr; }
-    };
-
-    /**
-     * @brief RAII wrapper for a Broadcom mailbox handle.
-     *
-     * Opens the mailbox in the constructor and closes it in the destructor.
-     * Throws if `mbox_open()` fails.
-     */
-    class MailboxHandle
-    {
-        int fd_;
-
-    public:
-        /** @throws std::runtime_error if `mbox_open()` returns < 0. */
-        MailboxHandle() : fd_(mbox_open())
-        {
-            if (fd_ < 0)
-                throw std::runtime_error("MailboxHandle: mbox_open failed");
-        }
-
-        ~MailboxHandle()
-        {
-            if (fd_ >= 0)
-                mbox_close(fd_);
-        }
-
-        /** @return The mailbox file descriptor. */
-        int get() const { return fd_; }
-
-        /**
-         * @brief Release ownership so the destructor won’t close.
-         *
-         * Use after transferring `fd_` to `mailbox_.handle`.
-         */
-        void release() { fd_ = -1; }
-    };
-
-    /**
-     * @brief Determine the SOC peripheral base address from the device tree.
-     *
-     * Reads the 4-byte values at offsets 4 and 8 of
-     * `/proc/device-tree/soc/ranges` to discover the peripheral base.
-     * Falls back to 0x2000 0000 if neither is available.
-     *
-     * @return The bus address to pass as the offset for `mmap()`.
-     */
-    static off_t discover_peripheral_base()
-    {
-        uint32_t base = 0x20000000;
-        if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 4); v && *v != 0)
-        {
-            base = *v;
-        }
-        else if (auto v = read_dt_range("/proc/device-tree/soc/ranges", 8); v)
-        {
-            base = *v;
-        }
-        return static_cast<off_t>(base);
-    }
+    static constexpr size_t NUM_PAGES = 4096;
 
     /**
      * @brief RAII for a pool of DMA-capable pages allocated via mailbox.
@@ -231,40 +80,37 @@ namespace
      */
     class MailboxMemoryPool
     {
-        int mbox_fd_;
         size_t total_size_;
-        unsigned mem_ref_, bus_addr_;
-        unsigned char *virt_addr_;
+        uint32_t mem_ref_;
+        std::uintptr_t bus_addr_;
+        volatile uint8_t *virt_addr_;
 
     public:
         /**
-         * @param mbox_fd   Open mailbox descriptor.
          * @param numpages  Number of pages to allocate (1 const + N instr).
-         * @param mem_flag  The mailbox allocation flag from `dma_config_.mem_flag`.
          */
-        MailboxMemoryPool(int mbox_fd, unsigned numpages, uint32_t mem_flag)
-            : mbox_fd_(mbox_fd),
-              total_size_(numpages * kPageSize),
+        MailboxMemoryPool(unsigned numpages)
+            : total_size_(numpages * Mailbox::PAGE_SIZE),
               mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
         {
             // Allocate
-            mem_ref_ = mem_alloc(mbox_fd_, total_size_, kBlockSize, mem_flag);
+            mem_ref_ = mailbox.mem_alloc(total_size_, Mailbox::BLOCK_SIZE);
             if (!mem_ref_)
                 throw std::runtime_error("MailboxMemoryPool: mem_alloc failed");
             // Lock
-            bus_addr_ = mem_lock(mbox_fd_, mem_ref_);
+            bus_addr_ = mailbox.mem_lock(mem_ref_);
             if (!bus_addr_)
             {
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_free(mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mem_lock failed");
             }
             // Map
-            auto phys = static_cast<off_t>(bus_addr_ & ~0xC0000000UL);
-            virt_addr_ = static_cast<unsigned char *>(mapmem(phys, total_size_));
+            auto phys = static_cast<off_t>(Mailbox::bus_to_physical(bus_addr_));
+            virt_addr_ = mailbox.mapmem(phys, total_size_);
             if (!virt_addr_)
             {
-                mem_unlock(mbox_fd_, mem_ref_);
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_unlock(mem_ref_);
+                mailbox.mem_free(mem_ref_);
                 throw std::runtime_error("MailboxMemoryPool: mapmem failed");
             }
         }
@@ -274,21 +120,19 @@ namespace
         {
             if (virt_addr_)
             {
-                unmapmem(virt_addr_, total_size_);
+                mailbox.unmapmem(virt_addr_, total_size_);
             }
             if (bus_addr_)
             {
-                mem_unlock(mbox_fd_, mem_ref_);
-                mem_free(mbox_fd_, mem_ref_);
+                mailbox.mem_unlock(mem_ref_);
+                mailbox.mem_free(mem_ref_);
             }
         }
 
         /** @return Virtual base pointer for the DMA pages. */
-        unsigned char *virt() const { return virt_addr_; }
+        volatile uint8_t *virt() const { return virt_addr_; }
         /** @return Bus address of the first DMA page. */
-        unsigned bus() const { return bus_addr_; }
-        /** @return Total size of the mapped region, in bytes. */
-        size_t size() const { return total_size_; }
+        std::uintptr_t bus() const { return bus_addr_; }
     };
 
 } // end anonymous namespace
@@ -414,23 +258,10 @@ void WsprTransmitter::setupTransmission(
     // Choose WSPR mode and symbol timing
     int offset_freq = 0;
 
-    // We are not supporting WSPR-15, leaving this here for posterity
-    // if (!trans_params_.is_tone && inWspr15Band(trans_params_.frequency))
-    // {
-    //     // WSPR-15 mode
-    //     trans_params_.wspr_mode = WsprMode::WSPR15;
-    //     trans_params_.symtime = 8.0 * WSPR_SYMTIME;
-    //     if (trans_params_.use_offset)
-    //         offset_freq = WSPR15_RAND_OFFSET;
-    // }
-    // else
-    {
-        // WSPR‑2 mode
-        trans_params_.wspr_mode = WsprMode::WSPR2;
-        trans_params_.symtime = WSPR_SYMTIME;
-        if (trans_params_.use_offset)
-            offset_freq = WSPR_RAND_OFFSET;
-    }
+    // WSPR‑2 mode
+    trans_params_.symtime = WSPR_SYMTIME;
+    if (trans_params_.use_offset)
+        offset_freq = WSPR_RAND_OFFSET;
     trans_params_.tone_spacing = 1.0 / trans_params_.symtime;
 
     // Apply random offset if requested
@@ -465,11 +296,16 @@ void WsprTransmitter::setupTransmission(
     // Optional debug output
     if (debug)
     {
-        std::cout << std::setprecision(30)
-                  << "[DEBUG WsprTransmitter] dma_table_freq[0] = " << trans_params_.dma_table_freq[0] << std::endl
-                  << "[DEBUG WsprTransmitter] dma_table_freq[1] = " << trans_params_.dma_table_freq[1] << std::endl
-                  << "[DEBUG WsprTransmitter] dma_table_freq[2] = " << trans_params_.dma_table_freq[2] << std::endl
-                  << "[DEBUG WsprTransmitter] dma_table_freq[3] = " << trans_params_.dma_table_freq[3] << std::endl;
+        std::cout << std::fixed << std::setprecision(10)
+                  << "[DEBUG WsprTransmitter] dma_table_freq[0] = "
+                  << (trans_params_.dma_table_freq[0] * 1e-6) << " MHz\n"
+                  << "[DEBUG WsprTransmitter] dma_table_freq[1] = "
+                  << (trans_params_.dma_table_freq[1] * 1e-6) << " MHz\n"
+                  << "[DEBUG WsprTransmitter] dma_table_freq[2] = "
+                  << (trans_params_.dma_table_freq[2] * 1e-6) << " MHz\n"
+                  << "[DEBUG WsprTransmitter] dma_table_freq[3] = "
+                  << (trans_params_.dma_table_freq[3] * 1e-6) << " MHz"
+                  << std::endl;
     }
 }
 
@@ -629,9 +465,6 @@ void WsprTransmitter::printParameters()
               << std::fixed << std::setprecision(1)
               << convert_mw_dbm(get_gpio_power_mw(trans_params_.power)) << " dBm" << std::endl;
 
-    std::cout << "WSPR Mode:         "
-              << (trans_params_.is_tone ? "N/A" : (trans_params_.wspr_mode == WsprMode::WSPR2 ? "WSPR-2" : "WSPR-15")) << std::endl;
-
     std::cout << "Test Tone:         "
               << (trans_params_.is_tone ? "True" : "False") << std::endl;
 
@@ -670,28 +503,6 @@ void WsprTransmitter::printParameters()
         }
         std::cout << std::endl;
     }
-}
-
-/**
- * @brief Determine if a frequency falls within any WSPR-15 band.
- *
- * @param freq  Frequency in Hz to test.
- * @return `true` if `freq` lies strictly between the low and high edges
- *         of any WSPR-15 range, `false` otherwise.
- *
- * @note The check is exclusive (`lo < freq < hi`). If you need inclusive
- *       bounds, change to `lo <= freq && freq <= hi`.
- */
-bool WsprTransmitter::inWspr15Band(double freq) noexcept
-{
-    for (const auto &[lo, hi] : WSPR15_RANGES)
-    {
-        if (freq > lo && freq < hi)
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 /* Private Methods */
@@ -867,7 +678,7 @@ void WsprTransmitter::join_transmission()
  *   4. Reset the DMA controller.
  *   5. Unmap the peripheral base address region.
  *   6. Deallocate mailbox memory pages.
- *   7. Close the mailbox handle.
+ *   7. Close the mailbox.
  *   8. Remove the local device file.
  *   9. Reset all configuration data to defaults.
  *
@@ -906,28 +717,19 @@ void WsprTransmitter::dma_cleanup()
     // Unmap peripheral region if mapped
     if (dma_config_.peripheral_base_virtual)
     {
-        munmap(dma_config_.peripheral_base_virtual,
-               dma_config_.peripheral_map_size);
+        ::mailbox.unmapmem(dma_config_.peripheral_base_virtual, Mailbox::PAGE_SIZE * NUM_PAGES);
         dma_config_.peripheral_base_virtual = nullptr;
-        dma_config_.peripheral_map_size = 0;
     }
 
     // Deallocate mailbox-allocated memory pages
     deallocate_memory_pool();
 
-    // Close mailbox handle if open
-    if (mailbox_.handle >= 0)
-    {
-        mbox_close(mailbox_.handle);
-        mailbox_.handle = -1;
-    }
-
-    // Remove the local device file if it exists
-    safe_remove();
+    // Close mailbox if open
+    mailbox.mbox_close();
 
     // Reset global configuration structures to defaults
-    dma_config_ = DMAConfig(); // Uses your in-class initializers
-    mailbox_ = Mailbox();      // Uses your in-class initializers
+    dma_config_ = DMAConfig();         // Uses your in-class initializers
+    mailbox_struct_ = MailboxStruct(); // Uses your in-class initializers
 }
 
 /**
@@ -1034,14 +836,10 @@ void WsprTransmitter::set_thread_priority()
 inline volatile int &WsprTransmitter::access_bus_address(std::uintptr_t bus_addr)
 {
     // Compute byte‐offset from the bus address
-    std::uintptr_t offset = bus_addr - 0x7E000000UL;
-
-    // Treat the void* as a char* (1‐byte pointer) so pointer arithmetic
-    // is in bytes.
-    auto base = static_cast<char *>(dma_config_.peripheral_base_virtual);
+    std::uintptr_t offset = Mailbox::offset_from_base(bus_addr);
 
     // Add the offset, then cast to a volatile‐int pointer and dereference.
-    return *reinterpret_cast<volatile int *>(base + offset);
+    return *reinterpret_cast<volatile int *>(dma_config_.peripheral_base_virtual + offset);
 }
 
 /**
@@ -1070,20 +868,6 @@ inline void WsprTransmitter::set_bit_bus_address(std::uintptr_t base, unsigned i
 inline void WsprTransmitter::clear_bit_bus_address(std::uintptr_t base, unsigned int bit)
 {
     access_bus_address(base) &= ~(1 << bit);
-}
-
-/**
- * @brief Converts a bus address to a physical address.
- *
- * This function converts a given bus address into the corresponding physical address by
- * masking out the upper bits (0xC0000000) that are not part of the physical address.
- *
- * @param x The bus address.
- * @return The physical address obtained from the bus address.
- */
-inline std::uintptr_t WsprTransmitter::bus_to_physical(std::uintptr_t x)
-{
-    return x & ~0xC0000000UL;
 }
 
 /**
@@ -1116,15 +900,14 @@ int WsprTransmitter::symbol_timeval_subtract(struct timeval *result, const struc
  *   1. Reads the Raspberry Pi hardware revision from `/proc/cpuinfo` (cached
  *      after first read).
  *   2. Determines the processor ID (BCM2835, BCM2836/37, or BCM2711).
- *   3. Sets `dma_config_.mem_flag` to the correct mailbox allocation flag.
- *   4. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
+ *   3. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
  *      frequency (500 MHz for Pi 1/2/3, 750 MHz for Pi 4).
- *   5. Initializes `dma_config_.plld_clock_frequency` equal to
+ *   4. Initializes `dma_config_.plld_clock_frequency` equal to
  *      `plld_nominal_freq` (zero PPM correction).
  *
  * @throws std::runtime_error if the processor ID is unrecognized.
  */
-void WsprTransmitter::get_plld_and_memflag()
+void WsprTransmitter::get_plld()
 {
     // Cache the revision to avoid repeated file I/O
     static std::optional<unsigned> cached_revision;
@@ -1147,37 +930,43 @@ void WsprTransmitter::get_plld_and_memflag()
         }
         if (!cached_revision)
         {
-            cached_revision = 0; // fallback if parsing fails
+            cached_revision = 0; // Fallback if parsing fails
         }
     }
 
-    const unsigned rev = *cached_revision;
+    unsigned rev = *cached_revision;
+    BCMChip proc_id;
 
-    // Extract processor ID (high‑bit indicates new format)
-    const int proc_id = (rev & 0x800000)
-                            ? ((rev & 0xF000) >> 12)
-                            : BCM_HOST_PROCESSOR_BCM2835;
+    if (rev & 0x800000)
+    {
+        auto raw = (rev & 0xF000) >> 12;
+        proc_id = static_cast<BCMChip>(raw);
+    }
+    else
+    {
+        proc_id = BCMChip::BCM_HOST_PROCESSOR_BCM2835;
+    }
 
-    // Determine base PLLD frequency and mailbox flag
     double base_freq_hz = 500e6;
     switch (proc_id)
     {
-    case BCM_HOST_PROCESSOR_BCM2835: // Pi 1
-        dma_config_.mem_flag = 0x0C;
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2835: // Pi 1
         base_freq_hz = 500e6;
         break;
-    case BCM_HOST_PROCESSOR_BCM2836: // Pi 2
-    case BCM_HOST_PROCESSOR_BCM2837: // Pi 3
-        dma_config_.mem_flag = 0x04;
+
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2836: // Pi 2
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2837: // Pi 3
         base_freq_hz = 500e6;
         break;
-    case BCM_HOST_PROCESSOR_BCM2711: // Pi 4
-        dma_config_.mem_flag = 0x04;
+
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2711: // Pi 4
         base_freq_hz = 750e6;
         break;
+
     default:
         throw std::runtime_error(
-            "Error: Unknown chipset (" + std::to_string(proc_id) + ")");
+            std::string("Error: Unknown chipset (") +
+            std::string(to_string(proc_id)) + ")");
     }
 
     // Store nominal and initial (zero‑PPM) working frequency
@@ -1211,45 +1000,42 @@ void WsprTransmitter::get_plld_and_memflag()
 void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 {
     // Allocate a contiguous block of physical pages
-    mailbox_.mem_ref = mem_alloc(
-        mailbox_.handle,
-        PAGE_SIZE * numpages,
-        BLOCK_SIZE,
-        dma_config_.mem_flag);
-    if (mailbox_.mem_ref == 0)
+    mailbox_struct_.mem_ref = mailbox.mem_alloc(
+        Mailbox::PAGE_SIZE * numpages,
+        Mailbox::BLOCK_SIZE);
+    if (mailbox_struct_.mem_ref == 0)
     {
         throw std::runtime_error("Error: mem_alloc failed.");
     }
 
     // Lock the block to obtain its bus address
-    mailbox_.bus_addr = mem_lock(mailbox_.handle, mailbox_.mem_ref);
-    if (mailbox_.bus_addr == 0)
+    mailbox_struct_.bus_addr = mailbox.mem_lock(mailbox_struct_.mem_ref);
+    if (mailbox_struct_.bus_addr == 0)
     {
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.mem_ref);
         throw std::runtime_error("Error: mem_lock failed.");
     }
 
     // Map the locked pages into user‑space virtual memory
-    mailbox_.virt_addr = static_cast<unsigned char *>(
-        mapmem(bus_to_physical(mailbox_.bus_addr), PAGE_SIZE * numpages));
-    if (mailbox_.virt_addr == nullptr)
+    mailbox_struct_.virt_addr = mailbox.mapmem(mailbox.bus_to_physical(mailbox_struct_.bus_addr), Mailbox::PAGE_SIZE * numpages);
+    if (mailbox_struct_.virt_addr == nullptr)
     {
-        mem_unlock(mailbox_.handle, mailbox_.mem_ref);
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
+        mailbox.mem_unlock(mailbox_struct_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.mem_ref);
         throw std::runtime_error("Error: mapmem failed.");
     }
 
     // Record pool parameters
-    mailbox_.pool_size = numpages; // total pages available
-    mailbox_.pool_cnt = 0;         // pages allocated so far
+    mailbox_struct_.pool_size = numpages; // total pages available
+    mailbox_struct_.pool_cnt = 0;         // pages allocated so far
 
     if (debug)
     {
         // Debug output: Show allocated bus & virtual addresses
         std::cout << "[DEBUG WsprTransmitter] allocate_memory_pool bus_addr=0x"
-                  << std::hex << mailbox_.bus_addr
-                  << " virt_addr=0x" << reinterpret_cast<unsigned long>(mailbox_.virt_addr)
-                  << " mem_ref=0x" << mailbox_.mem_ref
+                  << std::hex << mailbox_struct_.bus_addr
+                  << " virt_addr=0x" << reinterpret_cast<unsigned long>(mailbox_struct_.virt_addr)
+                  << " mem_ref=0x" << mailbox_struct_.mem_ref
                   << std::dec << std::endl;
     }
 }
@@ -1265,17 +1051,17 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
 {
     // Ensure that we do not exceed the allocated pool size.
-    if (mailbox_.pool_cnt >= mailbox_.pool_size)
+    if (mailbox_struct_.pool_cnt >= mailbox_struct_.pool_size)
     {
         throw std::runtime_error("Error: unable to allocate more pages.");
     }
 
     // Compute the offset for the next available page.
-    unsigned offset = mailbox_.pool_cnt * PAGE_SIZE;
+    unsigned offset = mailbox_struct_.pool_cnt * Mailbox::PAGE_SIZE;
 
     // Retrieve the virtual and bus addresses based on the offset.
-    *vAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_.virt_addr) + offset);
-    *bAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_.bus_addr) + offset);
+    *vAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.virt_addr) + offset);
+    *bAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.bus_addr) + offset);
 
     if (debug)
     {
@@ -1287,7 +1073,7 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
     }
 
     // Increment the count of allocated pages.
-    mailbox_.pool_cnt++;
+    mailbox_struct_.pool_cnt++;
 }
 
 /**
@@ -1298,23 +1084,23 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
 void WsprTransmitter::deallocate_memory_pool()
 {
     // Free virtual memory mapping if it was allocated.
-    if (mailbox_.virt_addr != nullptr)
+    if (mailbox_struct_.virt_addr != nullptr)
     {
-        unmapmem(mailbox_.virt_addr, mailbox_.pool_size * PAGE_SIZE);
-        mailbox_.virt_addr = nullptr; // Prevent dangling pointer usage
+        mailbox.unmapmem(mailbox_struct_.virt_addr, mailbox_struct_.pool_size * Mailbox::PAGE_SIZE);
+        mailbox_struct_.virt_addr = nullptr; // Prevent dangling pointer usage
     }
 
     // Free the allocated memory block if it was successfully allocated.
-    if (mailbox_.mem_ref != 0)
+    if (mailbox_struct_.mem_ref != 0)
     {
-        mem_unlock(mailbox_.handle, mailbox_.mem_ref);
-        mem_free(mailbox_.handle, mailbox_.mem_ref);
-        mailbox_.mem_ref = 0; // Ensure it does not reference a freed block
+        mailbox.mem_unlock(mailbox_struct_.mem_ref);
+        mailbox.mem_free(mailbox_struct_.mem_ref);
+        mailbox_struct_.mem_ref = 0; // Ensure it does not reference a freed block
     }
 
     // Reset pool tracking variables
-    mailbox_.pool_size = 0;
-    mailbox_.pool_cnt = 0;
+    mailbox_struct_.pool_size = 0;
+    mailbox_struct_.pool_cnt = 0;
 }
 
 /**
@@ -1546,11 +1332,12 @@ void WsprTransmitter::transmit_symbol(
     }
     // Final debug
     if (debug)
-        std::cout << "[DEBUG WsprTransmitter] <instructions_[bufPtr] = 0x"
+        // Print the virtual pointer as an integer and the bus address (uintptr_t)
+        std::cout << "[DEBUG WsprTransmitter] <instructions_[" << bufPtr << "] = 0x"
                   << std::hex
-                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].v)
+                  << reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].v)
                   << " 0x"
-                  << reinterpret_cast<unsigned long>(instructions_[bufPtr].b)
+                  << static_cast<unsigned long long>(instructions_[bufPtr].b)
                   << std::dec << ">" << std::endl;
 }
 
@@ -1601,37 +1388,8 @@ double WsprTransmitter::bit_trunc(const double &d, const int &lsb)
  */
 void WsprTransmitter::open_mbox()
 {
-    // Attempt to open the mailbox
-    mailbox_.handle = mbox_open();
-
-    // Check for failure and handle the error
-    if (mailbox_.handle < 0)
-    {
-        throw std::runtime_error("Error: Failed to open mailbox.");
-    }
-}
-
-/**
- * @brief Safely removes a file if it exists.
- * @details Checks whether the specified file exists before attempting to remove it.
- *          If the file exists but removal fails, a warning is displayed.
- *
- * @param[in] filename Pointer to a null-terminated string containing the file path.
- */
-void WsprTransmitter::safe_remove()
-{
-    const char *filename = LOCAL_DEVICE_FILE_NAME;
-    struct stat buffer;
-
-    // Check if the file exists before attempting to remove it
-    if (stat(filename, &buffer) == 0)
-    {
-        // Attempt to remove the file
-        if (unlink(filename) != 0)
-        {
-            std::cerr << "Warning: Failed to remove " << filename << std::endl;
-        }
-    }
+    // Open the mailbox
+    mailbox.mbox_open();
 }
 
 /**
@@ -1654,7 +1412,13 @@ void WsprTransmitter::create_dma_pages(
     allocate_memory_pool(1025);
 
     // Allocate a memory page for storing constants
-    get_real_mem_page_from_pool(&const_page_.v, &const_page_.b);
+    {
+        // allocate a real memory page for constants
+        void *tmp_v, *tmp_b;
+        get_real_mem_page_from_pool(&tmp_v, &tmp_b);
+        const_page_.v = tmp_v;
+        const_page_.b = reinterpret_cast<std::uintptr_t>(tmp_b);
+    }
 
     // Initialize instruction counter
     int instrCnt = 0;
@@ -1663,19 +1427,26 @@ void WsprTransmitter::create_dma_pages(
     while (instrCnt < 1024)
     {
         // Allocate a memory page for instructions
-        get_real_mem_page_from_pool(&instr_page_.v, &instr_page_.b);
+        {
+            // allocate a real memory page for this CB page
+            void *tmp_v, *tmp_b;
+            get_real_mem_page_from_pool(&tmp_v, &tmp_b);
+            instr_page_.v = tmp_v;
+            instr_page_.b = reinterpret_cast<std::uintptr_t>(tmp_b);
+        }
 
         // Create DMA control blocks (CBs)
         struct CB *instr0 = reinterpret_cast<struct CB *>(instr_page_.v);
 
-        for (int i = 0; i < static_cast<int>(PAGE_SIZE / sizeof(struct CB)); i++)
+        for (int i = 0; i < static_cast<int>(Mailbox::PAGE_SIZE / sizeof(struct CB)); i++)
         {
             // Assign virtual and bus addresses for each instruction
-            instructions_[instrCnt].v = reinterpret_cast<void *>(reinterpret_cast<long int>(instr_page_.v) + sizeof(struct CB) * i);
-            instructions_[instrCnt].b = reinterpret_cast<void *>(reinterpret_cast<long int>(instr_page_.b) + sizeof(struct CB) * i);
+            instructions_[instrCnt].v = static_cast<void *>(static_cast<char *>(instr_page_.v) + sizeof(struct CB) * i);
+            instructions_[instrCnt].b = instr_page_.b + static_cast<std::uintptr_t>(sizeof(struct CB) * i);
 
-            // Configure DMA transfer: Source = constant memory page, Destination = PWM FIFO
-            instr0->SOURCE_AD = reinterpret_cast<unsigned long int>(const_page_.b) + 2048;
+            // Configure DMA transfer: Source = constant memory page, Destination = PWM FI
+            // On 64-bit, const_page_.b is already a uintptr_t; truncate to 32 bits for the register.
+            instr0->SOURCE_AD = static_cast<uint32_t>(const_page_.b + 2048);
             instr0->DEST_AD = PWM_BUS_BASE + 0x18; // FIFO1
             instr0->TXFR_LEN = 4;
             instr0->STRIDE = 0;
@@ -1694,7 +1465,9 @@ void WsprTransmitter::create_dma_pages(
             // Link previous instruction to the next in the DMA sequence
             if (instrCnt != 0)
             {
-                reinterpret_cast<struct CB *>(instructions_[instrCnt - 1].v)->NEXTCONBK = reinterpret_cast<long int>(instructions_[instrCnt].b);
+                // On 64-bit, truncate the bus address to 32 bits for the DMA engine:
+                reinterpret_cast<volatile CB *>(instructions_[instrCnt - 1].v)
+                    ->NEXTCONBK = static_cast<uint32_t>(instructions_[instrCnt].b);
             }
 
             instr0++;
@@ -1702,8 +1475,12 @@ void WsprTransmitter::create_dma_pages(
         }
     }
 
-    // Create a circular linked list of DMA instructions
-    reinterpret_cast<struct CB *>(instructions_[1023].v)->NEXTCONBK = reinterpret_cast<long int>(instructions_[0].b);
+    // Create a circular linked list of DMA instructions (64-bit safe)
+    reinterpret_cast<volatile CB *>(instructions_[1023].v)
+        ->NEXTCONBK = static_cast<uint32_t>(instructions_[0].b);
+    // Create a circular linked list of DMA instructions (64-bit safe)
+    reinterpret_cast<volatile CB *>(instructions_[1023].v)
+        ->NEXTCONBK = static_cast<uint32_t>(instructions_[0].b);
 
     // Configure the PWM clock (disable, set divisor, enable)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000026; // Source = PLLD, disable
@@ -1727,20 +1504,18 @@ void WsprTransmitter::create_dma_pages(
     //
     // Compute the byte‐offset from the bus base (0x7E000000) to your desired
     // DMA register block (DMA_BUS_BASE).
-    std::uintptr_t delta = DMA_BUS_BASE - 0x7E000000UL;
-    //
-    // Treat your void* as a char* so arithmetic is in bytes
-    auto base = static_cast<char *>(dma_config_.peripheral_base_virtual);
-    //
+    std::uintptr_t delta = DMA_BUS_BASE - Mailbox::PERIPH_BUS_BASE;
+
     // Add the offset, then cast to your register pointer
-    volatile int *dma_base = reinterpret_cast<volatile int *>(base + delta);
+    volatile uint8_t *dma_base = dma_config_.peripheral_base_virtual + delta;
 
     // Cast to DMAregs pointer to activate DMA
     volatile struct DMAregs *DMA0 = reinterpret_cast<volatile struct DMAregs *>(dma_base);
     DMA0->CS = 1 << 31; // Reset DMA
     DMA0->CONBLK_AD = 0;
     DMA0->TI = 0;
-    DMA0->CONBLK_AD = reinterpret_cast<unsigned long int>(instr_page_.b);
+    // on a 64-bit build, DMA regs are only 32 bits wide
+    DMA0->CONBLK_AD = static_cast<uint32_t>(instr_page_.b);
     DMA0->CS = (1 << 0) | (255 << 16); // Enable DMA, priority level 255
 }
 
@@ -1760,20 +1535,17 @@ void WsprTransmitter::create_dma_pages(
  */
 void WsprTransmitter::setup_dma()
 {
-    // 1) PLLD & mem‐flag
-    get_plld_and_memflag();
+    // Open the mailbox
+    open_mbox();
 
-    // 2) map peripherals
-    int mem_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
-    if (mem_fd < 0)
-        throw std::runtime_error(std::string("setup_dma: open /dev/mem: ") + std::strerror(errno));
-    off_t base = discover_peripheral_base();
-    MMapRegion region(mem_fd, base, kPageSize * 4096 /*=0x01000000*/);
-    ::close(mem_fd);
-    dma_config_.peripheral_base_virtual = region.get();
-    region.release();
+    // PLLD & mem-flag
+    get_plld();
 
-    // 3) snapshot regs
+    // Map peripherals via mailbox.mapmem()
+    uint32_t base = Mailbox::discover_peripheral_base();
+    dma_config_.peripheral_base_virtual = ::mailbox.mapmem(base, Mailbox::PAGE_SIZE * NUM_PAGES /*=0x01000000*/);
+
+    // Snapshot regs
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
     dma_config_.orig_gp0div = access_bus_address(CM_GP0DIV_BUS);
     dma_config_.orig_pwm_ctl = access_bus_address(PWM_BUS_BASE + 0x00);
@@ -1782,16 +1554,13 @@ void WsprTransmitter::setup_dma()
     dma_config_.orig_pwm_rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
     dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
 
-    // 4) open mailbox & pool
-    MailboxHandle mbox;
-    mailbox_.handle = mbox.get();
-    mbox.release();
-    MailboxMemoryPool pool(mailbox_.handle, /*numpages=*/1025, dma_config_.mem_flag);
+    // Create memory pool
+    MailboxMemoryPool pool(/*numpages=*/1025);
 
-    // 5) build DMA pages (old signature)
+    // Build DMA pages (old signature)
     create_dma_pages(const_page_, instr_page_, instructions_);
 
-    // 6) done
+    // Done
     dma_setup_done_ = true;
 }
 

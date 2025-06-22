@@ -5,10 +5,12 @@
 
 // C++ Standard Library
 #include <array>              // std::array for signal list
+#include <chrono>             // std::chrono
 #include <condition_variable> // g_end_cv
 #include <csignal>            // sigaction, std::signal
 #include <cstring>            // strsignal()
 #include <cstdio>             // getchar()
+#include <iomanip>            // std::ostringstream
 #include <iostream>           // std::cout, std::getline
 #include <mutex>              // g_end_mtx
 #include <string>             // std::string
@@ -17,7 +19,17 @@
 #include <termios.h> // tcgetattr(), tcsetattr()
 #include <unistd.h>  // STDIN_FILENO
 
-// at file scope
+// Frequency choices
+static constexpr double _80m = 3568600.0;
+static constexpr double _40m = 7038600.0;
+static constexpr double _20m = 14095600.0;
+static constexpr double freq_ = _20m;
+
+// Time/duration tracking
+std::chrono::high_resolution_clock::time_point start_time;
+std::chrono::duration<double> elapsed;
+
+// Thread tracking/execution
 static std::mutex g_end_mtx;
 static std::condition_variable g_end_cv;
 static bool g_transmission_done = false;
@@ -57,12 +69,12 @@ struct TermiosGuard
 int getch()
 {
     struct termios oldAttr, newAttr;
-    tcgetattr(STDIN_FILENO, &oldAttr); // get terminal attributes
+    tcgetattr(STDIN_FILENO, &oldAttr); // Get terminal attributes
     newAttr = oldAttr;
-    newAttr.c_lflag &= ~(ICANON | ECHO);        // disable canonical mode and echo
-    tcsetattr(STDIN_FILENO, TCSANOW, &newAttr); // set new terminal attributes
+    newAttr.c_lflag &= ~(ICANON | ECHO);        // Disable canonical mode and echo
+    tcsetattr(STDIN_FILENO, TCSANOW, &newAttr); // Set new terminal attributes
     int ch = getchar();
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldAttr); // restore old terminal attributes
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldAttr); // Restore old terminal attributes
     return ch;
 }
 
@@ -73,7 +85,7 @@ int getch()
  */
 void wait_for_space_or_signal()
 {
-    TermiosGuard tguard; // switch to non-canonical mode for the duration
+    TermiosGuard tguard; // Switch to non-canonical mode for the duration
 
     char c;
     while (!g_terminate.load(std::memory_order_acquire))
@@ -93,7 +105,7 @@ void wait_for_space_or_signal()
 
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
         {
-            // signal arrived — bail out
+            // Signal arrived — bail out
             break;
         }
         if (FD_ISSET(STDIN_FILENO, &rfds))
@@ -106,7 +118,7 @@ void wait_for_space_or_signal()
 
 bool select_wspr()
 {
-    TermiosGuard tg; // raw input
+    TermiosGuard tg; // Raw input
     std::cout << "Select mode:\n"
               << "  1) WSPR\n"
               << "  2) TONE\n"
@@ -122,27 +134,31 @@ bool select_wspr()
 
         if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0)
         {
+            std::cout << std::endl;
             if (errno == EINTR)
                 continue;
             throw std::runtime_error("select failed");
         }
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
         {
-            // got Ctrl-C
-            return false; // or exit early
+            // Got Ctrl-C
+            std::cout << std::endl;
+            return false; // Or exit early
         }
         if (FD_ISSET(STDIN_FILENO, &rfds))
         {
             char c;
             if (::read(STDIN_FILENO, &c, 1) == 1)
             {
+                std::cout << std::endl;
                 if (c == '2')
                     return false;
                 else
-                    return true; // default to 1/WSPR
+                    return true; // Default to 1/WSPR
             }
         }
     }
+    std::cout << std::endl;
     return false;
 }
 
@@ -152,28 +168,47 @@ void sig_handler(int)
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
     wsprTransmitter.shutdownTransmitter();
     g_terminate.store(true);
-    // wake any select()/poll() on your self-pipe
+    // Wake any select()/poll() on your self-pipe
     const char wake = 1;
     write(sig_pipe_fds[1], &wake, 1);
 }
 
 void start_cb(const std::string &msg = {})
 {
+    start_time = std::chrono::high_resolution_clock::now();
+
     if (!msg.empty())
     {
-        std::cout << "[CALLBACK] Started transmission (" << msg << ")." << std::endl;
+        // Print with frequency as string
+        std::cout << "Started transmission (" << msg << ")." << std::endl;
     }
     else
     {
-        std::cout << "[CALLBACK] Started transmission." << std::endl;
+       std::cout << "Started transmission." << std::endl;
     }
+}
+
+void start_cb(double frequency_hz)
+{
+    // convert Hz → MHz
+    double frequency_mhz = frequency_hz / 1e6;
+
+    std::ostringstream oss;
+    oss << std::fixed
+        << std::setprecision(6)
+        << frequency_mhz
+        << " MHz";
+
+    start_cb(oss.str());
 }
 
 void end_cb(const std::string &msg = {})
 {
-    if (!msg.empty())
+    elapsed = std::chrono::high_resolution_clock::now() - start_time;
+
+    if (msg.length() <= 1)
     {
-        // handle the extra info
+        std::cout << "[CALLBACK] Completed transmission." << std::endl;
     }
     else
     {
@@ -195,7 +230,7 @@ int main()
         return 1;
     }
 
-    // — set up signals —
+    // Set up signals
     std::array<int, 6> signals = {SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT};
     for (int s : signals)
     {
@@ -207,71 +242,96 @@ int main()
     }
     std::signal(SIGCHLD, SIG_IGN);
 
-    // — pick mode —
+    // Pick mode
     bool isWspr = select_wspr();
     if (g_terminate.load(std::memory_order_acquire))
     {
-        // we saw Ctrl-C in the prompt, so bail out immediately
+        // We saw Ctrl-C in the prompt, so bail out immediately
         return 0;
     }
-    std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << "\n";
+    std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << std::endl;
 
-    // — get PPM correction and schedule priority —
+    // Get PPM correction and schedule priority
     config.ppm = get_ppm_from_chronyc();
-    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 30);
 
-    // — configure transmitter —
+    // Set transmission server and set priority
+    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 40);
+
+    // Configure transmitter
     if (isWspr)
     {
-        wsprTransmitter.setTransmissionCallbacks(start_cb, end_cb);
+        // Set transmission event callbacks
+        wsprTransmitter.setTransmissionCallbacks(
+            [](const WsprTransmitter::CallbackArg &arg)
+            {
+                start_cb(std::get<double>(arg));
+            },
+            [](const WsprTransmitter::CallbackArg &arg)
+            {
+                end_cb(std::get<std::string>(arg));
+            });
+
+        // Set minimum transmission data
         wsprTransmitter.setupTransmission(
-            0.0, 0, config.ppm,
+            freq_, 0, config.ppm,
             "AA0NT", "EM18", 20, /*use_offset=*/true);
     }
     else
     {
-        wsprTransmitter.setupTransmission(7040100.0, 0, config.ppm);
+        wsprTransmitter.setupTransmission(freq_, 0, config.ppm);
     }
 
+#ifdef DEBUG_WSPR_TRANSMIT
     wsprTransmitter.printParameters();
-    std::cout << "Setup for " << (isWspr ? "WSPR" : "tone") << " complete.\n";
+#endif
+    std::cout << "Setup for " << (isWspr ? "WSPR" : "tone") << " complete." << std::endl;
 
-    // — for tone mode, wait to start —
-    if (!isWspr)
+    // For tone mode, wait to start
+    if (isWspr)
     {
-        std::cout << "Press <spacebar> to begin test tone.\n";
+        std::cout << "Waiting for next transmission window." << std::endl;
+    }
+    else
+    {
+        std::cout << "Press <spacebar> to begin test tone." << std::endl;
         wait_for_space_or_signal();
     }
 
-    // — kick off the scheduler/transmission thread —
+    // Kick off the scheduler/transmission thread
     wsprTransmitter.enableTransmission();
 
     if (isWspr)
     {
         std::unique_lock<std::mutex> lk(g_end_mtx);
-        // wake every 100 ms to check for either completion or a Ctrl-C
-        while (!g_transmission_done && !g_terminate.load(std::memory_order_acquire))
+
+        // Wake every 100 ms to check for either completion or a Ctrl-C.
+        while (!g_transmission_done &&
+               !g_terminate.load(std::memory_order_acquire))
         {
             g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
         }
+
         if (g_transmission_done)
         {
-            std::cout << "WSPR transmission complete.\n";
+            std::cout << "WSPR transmission complete." << std::endl;
         }
         else
         {
-            std::cout << "Interrupted. Aborting WSPR transmission.\n";
+            std::cout << "Interrupted. Aborting WSPR transmission." << std::endl;
         }
+        std::cout << "Elapsed time: "
+                  << std::fixed << std::setprecision(3)
+                  << elapsed.count() << " seconds." << std::endl;
     }
     else
     {
-        // tone mode: stop on spacebar
-        std::cout << "Press <spacebar> to end test tone.\n";
+        // Tone mode: Stop on spacebar
+        std::cout << "Press <spacebar> to end test tone." << std::endl;
         wait_for_space_or_signal();
-        std::cout << "Test tone stopped.\n";
+        std::cout << "Test tone stopped." << std::endl;
     }
 
-    // — teardown —
+    // Teardown
     wsprTransmitter.shutdownTransmitter();
     return 0;
 }
