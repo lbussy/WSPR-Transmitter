@@ -951,13 +951,6 @@ private:
     double bit_trunc(const double &d, const int &lsb);
 
     /**
-     * @brief Opens the mailbox device.
-     * @details Creates the mailbox special files and attempts to open the mailbox.
-     *          If opening the mailbox fails, an error message is printed, and the program exits.
-     */
-    void open_mbox();
-
-    /**
      * @brief Configures and initializes DMA for PWM signal generation.
      * @details Allocates memory pages, creates DMA control blocks, sets up a
      *          circular inked list of DMA instructions, and configures the

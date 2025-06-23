@@ -228,10 +228,8 @@ void WsprTransmitter::setupTransmission(
     // If we’ve already got DMA up, tear down the old run
     if (dma_setup_done_)
     {
-        stopTransmission();        // tell the worker to stop
-        if (tx_thread_.joinable()) // wait for it to actually exit
-            tx_thread_.join();
-        dma_cleanup(); // now unmap/free everything
+        disableTransmission(); // Stop the trandmission and scheduler
+        dma_cleanup();         // Now unmap/free everything
     }
 
     // Clear the stop flag so the next thread can run
@@ -247,17 +245,19 @@ void WsprTransmitter::setupTransmission(
     trans_params_.use_offset = use_offset;
 
     // Default to tone‑only; load WSPR message if provided
-    trans_params_.is_tone = true;
     if (!trans_params_.call_sign.empty() && !trans_params_.grid_square.empty() && trans_params_.power_dbm != 0)
     {
         trans_params_.is_tone = false;
         WsprMessage msg(trans_params_.call_sign, trans_params_.grid_square, trans_params_.power_dbm);
         std::copy_n(msg.symbols, msg.size, trans_params_.symbols.begin());
     }
+    else
+    {
+        trans_params_.is_tone = true;
+    }
 
     // Choose WSPR mode and symbol timing
     int offset_freq = 0;
-
     // WSPR‑2 mode
     trans_params_.symtime = WSPR_SYMTIME;
     if (trans_params_.use_offset)
@@ -1382,17 +1382,6 @@ double WsprTransmitter::bit_trunc(const double &d, const int &lsb)
 }
 
 /**
- * @brief Opens the mailbox device.
- * @details Creates the mailbox special files and attempts to open the mailbox.
- *          If opening the mailbox fails, an error message is printed, and the program exits.
- */
-void WsprTransmitter::open_mbox()
-{
-    // Open the mailbox
-    mailbox.open();
-}
-
-/**
  * @brief Configures and initializes DMA for PWM signal generation.
  * @details Allocates memory pages, creates DMA control blocks, sets up a
  *          circular inked list of DMA instructions, and configures the
@@ -1536,7 +1525,7 @@ void WsprTransmitter::create_dma_pages(
 void WsprTransmitter::setup_dma()
 {
     // Open the mailbox
-    open_mbox();
+    mailbox.open();
 
     // PLLD & mem-flag
     get_plld();
