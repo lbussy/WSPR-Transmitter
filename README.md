@@ -140,7 +140,7 @@ void setThreadScheduling(int policy, int priority);
 void enableTransmission();   // non-blocking: tone or scheduler
 void disableTransmission();  // cancel scheduler + any active transmit
 void stopTransmission();     // request in-flight stop
-void shutdownTransmitter();  // disable + cleanup
+void stop();  // disable + cleanup
 ```
 
 #### Status & Debug

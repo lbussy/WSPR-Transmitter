@@ -166,7 +166,7 @@ void sig_handler(int)
 {
     const char msg[] = "Caught signal\nShutting down transmissions.\n";
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    wsprTransmitter.shutdownTransmitter();
+    wsprTransmitter.stop();
     g_terminate.store(true);
     // Wake any select()/poll() on your self-pipe
     const char wake = 1;
@@ -332,6 +332,6 @@ int main()
     }
 
     // Teardown
-    wsprTransmitter.shutdownTransmitter();
+    wsprTransmitter.stop();
     return 0;
 }

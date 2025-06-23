@@ -418,7 +418,7 @@ void WsprTransmitter::stopTransmission()
  *   1. Calls disableTransmission() to stop the scheduler thread and join any tx_thread_.
  *   2. Performs DMA/PWM/mailbox cleanup.
  */
-void WsprTransmitter::shutdownTransmitter()
+void WsprTransmitter::stop()
 {
     disableTransmission(); // stops scheduler, signals & joins tx_thread_
     dma_cleanup();         // unmaps peripherals, frees mailbox memory

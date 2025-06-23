@@ -214,7 +214,7 @@ public:
      *          fully terminated. After this call returns, no transmission
      *          thread remains running.
      */
-    void shutdownTransmitter();
+    void stop();
 
     /**
      * @brief Check if the GPIO is bound to the clock.
