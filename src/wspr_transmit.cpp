@@ -93,25 +93,48 @@ namespace
             : total_size_(numpages * Mailbox::PAGE_SIZE),
               mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
         {
-            // Allocate
-            mem_ref_ = mailbox.memAlloc(total_size_, Mailbox::BLOCK_SIZE);
-            if (!mem_ref_)
-                throw std::runtime_error("MailboxMemoryPool: memAlloc failed");
-            // Lock
-            bus_addr_ = mailbox.memLock(mem_ref_);
-            if (!bus_addr_)
+            try
             {
-                mailbox.memFree(mem_ref_);
-                throw std::runtime_error("MailboxMemoryPool: memLock failed");
+                // Allocate
+                mem_ref_ = mailbox.memAlloc(total_size_, Mailbox::BLOCK_SIZE);
+
+                // Lock
+                bus_addr_ = mailbox.memLock(mem_ref_);
+                if (bus_addr_ == 0)
+                    throw std::runtime_error("MailboxMemoryPool: memLock failed");
+
+                // Map
+                auto phys = static_cast<off_t>(Mailbox::busToPhysical(bus_addr_));
+                virt_addr_ = mailbox.mapMem(phys, total_size_);
+                if (virt_addr_ == nullptr)
+                    throw std::runtime_error("MailboxMemoryPool: mapMem failed");
             }
-            // Map
-            auto phys = static_cast<off_t>(Mailbox::busToPhysical(bus_addr_));
-            virt_addr_ = mailbox.mapMem(phys, total_size_);
-            if (!virt_addr_)
+            catch (const std::runtime_error &e)
             {
-                mailbox.memUnlock(mem_ref_);
-                mailbox.memFree(mem_ref_);
-                throw std::runtime_error("MailboxMemoryPool: mapMem failed");
+                // If it was a timeout, mailbox is already closed by memAlloc(),
+                // so just re-throw and let caller decide to reopen & retry.
+                if (std::string(e.what()).find("timed out") != std::string::npos)
+                {
+                    throw;
+                }
+
+                // Otherwise, clean up any allocation we made, then re-throw
+                if (virt_addr_)
+                {
+                    mailbox.unMapMem(virt_addr_, total_size_);
+                    virt_addr_ = nullptr;
+                }
+                if (bus_addr_)
+                {
+                    mailbox.memUnlock(mem_ref_);
+                    bus_addr_ = 0;
+                }
+                if (mem_ref_)
+                {
+                    mailbox.memFree(mem_ref_);
+                    mem_ref_ = 0;
+                }
+                throw; // preserve the original error
             }
         }
 
@@ -1402,7 +1425,7 @@ void WsprTransmitter::create_dma_pages(
 
     // Allocate a memory page for storing constants
     {
-        // allocate a real memory page for constants
+        // Allocate a real memory page for constants
         void *tmp_v, *tmp_b;
         get_real_mem_page_from_pool(&tmp_v, &tmp_b);
         const_page_.v = tmp_v;
@@ -1417,7 +1440,7 @@ void WsprTransmitter::create_dma_pages(
     {
         // Allocate a memory page for instructions
         {
-            // allocate a real memory page for this CB page
+            // Allocate a real memory page for this CB page
             void *tmp_v, *tmp_b;
             get_real_mem_page_from_pool(&tmp_v, &tmp_b);
             instr_page_.v = tmp_v;
@@ -1543,10 +1566,50 @@ void WsprTransmitter::setup_dma()
     dma_config_.orig_pwm_rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
     dma_config_.orig_pwm_fifocfg = access_bus_address(PWM_BUS_BASE + 0x08);
 
-    // Create memory pool
-    MailboxMemoryPool pool(/*numpages=*/1025);
+    constexpr int kMaxAttempts = 3;
+    int attempts = 0;
+    while (true)
+    {
+        try
+        {
+            // This may throw on timeout or other failure
+            MailboxMemoryPool pool(1025);
+            // Success!  Use 'pool' here…
+            break;
+        }
+        catch (const std::system_error &e)
+        {
+            if (e.code().value() == ETIMEDOUT)
+            {
+#ifdef DEBUG_WSPR_TRANSMIT
+                std::cerr << "[WSPR-Transmit] Timeout (attempt " << attempts << ") allocating memory pool, retrying.";
+#endif
+                // A timeout, let's retry
+                if (++attempts >= kMaxAttempts)
+                    throw std::runtime_error("Too many mailbox timeouts, giving up");
 
-    // Build DMA pages (old signature)
+                // Cleanly close and reopen the mailbox
+                try
+                {
+                    ::mailbox.close();
+                }
+                catch (...)
+                { /* Swallow */
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                ::mailbox.open();
+
+                // And loop to retry
+            }
+        }
+        catch (...)
+        {
+            // Some other error—propagate
+            throw;
+        }
+    }
+
+    // Build DMA pages
     create_dma_pages(const_page_, instr_page_, instructions_);
 
     // Done
