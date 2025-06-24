@@ -46,6 +46,7 @@
 #include <random>    // std::random_device, std::mt19937, std::uniform_real_distribution
 #include <sstream>   // std::stringstream
 #include <stdexcept> // std::runtime_error
+#include <string_view>
 #include <system_error>
 
 // POSIX & System-Specific Headers
@@ -60,6 +61,7 @@ constexpr const bool debug = true;
 #else
 constexpr const bool debug = false;
 #endif
+inline constexpr std::string_view debug_tag{"[WSPR-Transmitter] "};
 
 // Helper classes and functions in anonymous namespace
 namespace
@@ -315,21 +317,6 @@ void WsprTransmitter::setupTransmission(
     // Do not update if frequency = 0 (skip)
     if (trans_params_.frequency != 0.0)
         trans_params_.frequency = center_actual;
-
-    // Optional debug output
-    if (debug)
-    {
-        std::cout << std::fixed << std::setprecision(10)
-                  << "[DEBUG WsprTransmitter] dma_table_freq[0] = "
-                  << (trans_params_.dma_table_freq[0] * 1e-6) << " MHz\n"
-                  << "[DEBUG WsprTransmitter] dma_table_freq[1] = "
-                  << (trans_params_.dma_table_freq[1] * 1e-6) << " MHz\n"
-                  << "[DEBUG WsprTransmitter] dma_table_freq[2] = "
-                  << (trans_params_.dma_table_freq[2] * 1e-6) << " MHz\n"
-                  << "[DEBUG WsprTransmitter] dma_table_freq[3] = "
-                  << (trans_params_.dma_table_freq[3] * 1e-6) << " MHz"
-                  << std::endl;
-    }
 }
 
 /**
@@ -588,10 +575,6 @@ void WsprTransmitter::transmit()
     // If we're not in tone‐test mode and frequency was zeroed out, skip.
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {
-        if (debug)
-        {
-            std::cerr << "[DEBUG WsprTransmitter] transmit() Skipping transmission (frequency = 0.0.)" << std::endl;
-        }
         fire_end_cb("Skipping transmission (frequency = 0.0).");
         return;
     }
@@ -601,7 +584,7 @@ void WsprTransmitter::transmit()
     {
         if (debug)
         {
-            std::cerr << "[DEBUG WsprTransmitter] transmit(): transmit() aborted before start." << std::endl;
+            std::cerr << debug_tag << "transmit(): transmit() aborted before start." << std::endl;
         }
         fire_end_cb("Transmission aborted before start.");
         return;
@@ -1051,16 +1034,6 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     // Record pool parameters
     mailbox_struct_.pool_size = numpages; // total pages available
     mailbox_struct_.pool_cnt = 0;         // pages allocated so far
-
-    if (debug)
-    {
-        // Debug output: Show allocated bus & virtual addresses
-        std::cout << "[DEBUG WsprTransmitter] allocate_memory_pool bus_addr=0x"
-                  << std::hex << mailbox_struct_.bus_addr
-                  << " virt_addr=0x" << reinterpret_cast<unsigned long>(mailbox_struct_.virt_addr)
-                  << " mem_ref=0x" << mailbox_struct_.mem_ref
-                  << std::dec << std::endl;
-    }
 }
 
 /**
@@ -1085,15 +1058,6 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
     // Retrieve the virtual and bus addresses based on the offset.
     *vAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.virt_addr) + offset);
     *bAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.bus_addr) + offset);
-
-    if (debug)
-    {
-        // Debug print: Displays allocated memory details.
-        std::cout << "[DEBUG WsprTransmitter] get_real_mem_page_from_pool bus_addr=0x"
-                  << std::hex << reinterpret_cast<uintptr_t>(*bAddr)
-                  << " virt_addr=0x" << reinterpret_cast<uintptr_t>(*vAddr)
-                  << std::dec << std::endl;
-    }
 
     // Increment the count of allocated pages.
     mailbox_struct_.pool_cnt++;
@@ -1217,7 +1181,7 @@ void WsprTransmitter::transmit_symbol(
     if (stop_requested_.load(std::memory_order_acquire))
     {
         if (debug)
-            std::cout << "[DEBUG WsprTransmitter] transmit_symbol(" << sym_num
+            std::cout << debug_tag << "transmit_symbol(" << sym_num
                       << ") aborted before start." << std::endl;
         return;
     }
@@ -1225,12 +1189,6 @@ void WsprTransmitter::transmit_symbol(
     const bool is_tone = (tsym == 0.0);
     const int f0_idx = sym_num * 2;
     const int f1_idx = f0_idx + 1;
-
-    if (debug)
-        std::cout << "[DEBUG WsprTransmitter] <instructions_[bufPtr] begin = 0x"
-                  << std::hex
-                  << reinterpret_cast<unsigned long>(&instructions_[bufPtr])
-                  << std::dec << ">" << std::endl;
 
     if (is_tone)
     {
@@ -1279,10 +1237,6 @@ void WsprTransmitter::transmit_symbol(
             trans_params_.frequency - 1.5 * trans_params_.tone_spacing + sym_num * trans_params_.tone_spacing;
         const double f0_ratio =
             1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
-
-        if (debug)
-            std::cout << "[DEBUG WsprTransmitter] f0_ratio = " << f0_ratio << std::endl;
-        assert((f0_ratio >= 0.0) && (f0_ratio <= 1.0));
 
         while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
                !stop_requested_.load(std::memory_order_acquire))
@@ -1353,15 +1307,6 @@ void WsprTransmitter::transmit_symbol(
             n_f0_transmitted += n_f0;
         }
     }
-    // Final debug
-    if (debug)
-        // Print the virtual pointer as an integer and the bus address (uintptr_t)
-        std::cout << "[DEBUG WsprTransmitter] <instructions_[" << bufPtr << "] = 0x"
-                  << std::hex
-                  << reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].v)
-                  << " 0x"
-                  << static_cast<unsigned long long>(instructions_[bufPtr].b)
-                  << std::dec << ">" << std::endl;
 }
 
 /**
@@ -1581,12 +1526,12 @@ void WsprTransmitter::setup_dma()
         {
             if (e.code().value() == ETIMEDOUT)
             {
-#ifdef DEBUG_WSPR_TRANSMIT
-                std::cerr << "[WSPR-Transmit] Timeout (attempt " << attempts << ") allocating memory pool, retrying.";
-#endif
+                if (debug)
+                    std::cerr << debug_tag << "Timeout (attempt " << attempts << ") allocating memory pool, retrying.";
+
                 // A timeout, let's retry
                 if (++attempts >= kMaxAttempts)
-                    throw std::runtime_error("Too many mailbox timeouts, giving up");
+                    throw std::runtime_error("Mailbox::setup_dma() Too many mailbox timeouts, giving up");
 
                 // Cleanly close and reopen the mailbox
                 try
@@ -1641,7 +1586,8 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
         {
             std::stringstream temp;
             temp << std::fixed << std::setprecision(6)
-                 << "DEBUG: center frequency has been changed to "
+                << debug_tag 
+                 << "Center frequency has been changed to "
                  << center_freq_actual / 1e6 << " MHz";
             std::cerr << temp.str() << " because of hardware limitations." << std::endl;
         }
