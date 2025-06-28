@@ -1225,8 +1225,8 @@ void WsprTransmitter::transmit_symbol(
     }
     else
     {
-        // Finite WSPR symbol
-        const long int n_pwmclk_per_sym = std::lround(F_PWM_CLK_INIT * tsym);
+        // Calculate pwm freq
+        const long int n_pwmclk_per_sym = std::lround(pwm_clock_init_ * tsym);
         long int n_pwmclk_transmitted = 0;
         long int n_f0_transmitted = 0;
 
@@ -1559,6 +1559,21 @@ void WsprTransmitter::setup_dma()
 
     // Done
     dma_setup_done_ = true;
+
+    // Read back the divisor you just wrote
+    uint32_t div_reg = static_cast<uint32_t>(
+        access_bus_address(CLK_BUS_BASE + 41 * 4));
+    uint32_t divisor = (div_reg >> 12) & 0xFFF; // bits 23–12
+    pwm_clock_init_ = dma_config_.plld_clock_frequency / double(divisor);
+
+    if (debug)
+        std::cerr
+            << debug_tag
+            << "Actual PWM clock = "
+            << std::fixed << std::setprecision(0)
+            << pwm_clock_init_
+            << " Hz"
+            << std::endl;
 }
 
 /**
@@ -1586,7 +1601,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
         {
             std::stringstream temp;
             temp << std::fixed << std::setprecision(6)
-                << debug_tag 
+                 << debug_tag
                  << "Center frequency has been changed to "
                  << center_freq_actual / 1e6 << " MHz";
             std::cerr << temp.str() << " because of hardware limitations." << std::endl;

@@ -23,7 +23,7 @@
 static constexpr double _80m = 3568600.0;
 static constexpr double _40m = 7038600.0;
 static constexpr double _20m = 14095600.0;
-static constexpr double freq_ = _80m;
+static constexpr double freq_ = _20m;
 
 // Time/duration tracking
 std::chrono::high_resolution_clock::time_point start_time;
