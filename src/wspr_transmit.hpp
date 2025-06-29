@@ -397,8 +397,8 @@ private:
      * @brief Actual PWM clock frequency used for symbol timing.
      *
      * This field holds the measured PWM clock rate (in Hz) read back from the
-     * hardware after configuring the clock divisor. It replaces the fixed
-     * compile-time constant to ensure precise symbol durations across platforms.
+     * hardware after configuring the clock divisor. It ensures precise symbol
+     * durations across platforms.
      *
      * @details Calculated as:
      *   pwm_clock_init_ = plld_clock_frequency / divisor

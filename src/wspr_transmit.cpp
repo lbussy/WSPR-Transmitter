@@ -26,10 +26,9 @@
 
 #include "wspr_transmit.hpp" // Class Declarations
 
-#include "wspr_message.hpp" // WsprMessage Submodule
-
-#include "mailbox.hpp" // Broadcom Mailbox Submodule
-#include "bcm_model.hpp"
+#include "wspr_message.hpp" // WSPR Message Submodule
+#include "mailbox.hpp"      // Mailbox Submodule
+#include "bcm_model.hpp"    // Enumerates processor types
 
 // C++ Standard Library Headers
 #include <algorithm> // std::copy_n, std::clamp
@@ -1225,7 +1224,7 @@ void WsprTransmitter::transmit_symbol(
     }
     else
     {
-        // Calculate pwm freq
+        // Calculate PWM freq
         const long int n_pwmclk_per_sym = std::lround(pwm_clock_init_ * tsym);
         long int n_pwmclk_transmitted = 0;
         long int n_f0_transmitted = 0;
