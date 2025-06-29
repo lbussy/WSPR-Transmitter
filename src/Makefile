@@ -10,7 +10,7 @@ SUDO := sudo
 INI := /usr/local/etc/wspr.ini
 # Add any required submodules by their src path
 SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Message/src)
-SUBMODULE_SRCDIRS += $(wildcard ../../Broadcom-Mailbox/src)
+SUBMODULE_SRCDIRS += $(wildcard ../../Mailbox/src)
 SUBMODULE_SRCDIRS += $(wildcard ../external)
 
 # Get project name from Git, revert to directory name

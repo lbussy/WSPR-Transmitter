@@ -394,19 +394,19 @@ private:
     static constexpr double WSPR_SYMTIME = 8192.0 / 12000.0;
 
     /**
-     * @brief Initial empirical value for the PWM clock frequency used in WSPR
-     * transmissions.
+     * @brief Actual PWM clock frequency used for symbol timing.
      *
-     * This constant represents an empirically determined value for `F_PWM_CLK`
-     * that produces WSPR symbols approximately 0.682 seconds long (WSPR_SYMTIME).
+     * This field holds the measured PWM clock rate (in Hz) read back from the
+     * hardware after configuring the clock divisor. It ensures precise symbol
+     * durations across platforms.
      *
-     * @details Despite using DMA for transmission, system load on the Raspberry Pi
-     * affects the exact TX symbol length. However, the main loop compensates
-     * for these variations dynamically.
-     *
-     * @note If system performance changes, this value may require adjustment.
+     * @details Calculated as:
+     *   pwm_clock_init_ = plld_clock_frequency / divisor
+     * where `divisor` is read from the PWM clock divider register. Used in
+     * `transmit_symbol()` to convert the desired symbol time (`tsym`) into
+     * clock ticks.
      */
-    static constexpr double F_PWM_CLK_INIT = 31156186.6125761;
+    double pwm_clock_init_{0};
 
     /**
      * @brief Base bus address for the General-Purpose Input/Output (GPIO)
