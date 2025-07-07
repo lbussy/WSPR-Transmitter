@@ -102,8 +102,8 @@ public:
      *            The string may carry a descriptive message, while the double
      *            represents a frequency in Hz (or another unit depending on context).
      */
-    using CallbackArg = std::variant<std::string, double>;
-    using Callback = std::function<void(const CallbackArg &)>;
+    using StartCallback = std::function<void(const std::string & /*msg*/, double /*frequency*/)>;
+    using EndCallback = std::function<void(const std::string & /*msg*/, double /*elapsed_secs*/)>;
 
     /**
      * @brief Install optional callbacks for transmission start/end.
@@ -116,8 +116,8 @@ public:
      *   symbol is sent (but before DMA/PWM are torn down).  If null,
      *   no completion notification is made.
      */
-    void setTransmissionCallbacks(Callback start_cb = {},
-                                  Callback end_cb = {});
+    void setTransmissionCallbacks(StartCallback start_cb = {},
+                                  EndCallback end_cb = {});
 
     /**
      * @brief Configure and start a WSPR transmission.
@@ -247,7 +247,7 @@ private:
      * Users can assign a function via `setTransmissionCallbacks()` to
      * perform any setup or logging when transmission is about to start.
      */
-    Callback on_transmit_start_{};
+    StartCallback on_transmit_start_{};
 
     /**
      * @brief Invoked immediately after all WSPR symbols have been sent.
@@ -257,7 +257,7 @@ private:
      * Users can assign a function via `setTransmissionCallbacks()` to
      * perform any cleanup or notification when a WSPR transmission completes.
      */
-    Callback on_transmit_end_{};
+    EndCallback on_transmit_end_{};
 
     /**
      * @brief Background thread for carrying out the transmission.
@@ -719,22 +719,24 @@ private:
      *
      * @details Checks whether a start callback has been set, and if so,
      *          calls it with an empty message string to satisfy the
-     *          `Callback` signature.
+     *          `StartCallback` signature.
      *
      * @param frequency  A double frequency to pass into the callback.
      */
-    void fire_start_cb(const double frequency);
+    void fire_start_cb(const std::string &msg, double frequency);
 
     /**
      * @brief Safely invoke the user’s end‐transmission callback with a message.
      *
      * @details Checks whether an end callback has been set, and if so,
-     *          calls it with the provided message. Useful for reporting
-     *          completion status or diagnostics.
+     *          calls it with the provided message and transission duration
+     *.         value. Useful for reporting completion status or diagnostics.
      *
-     * @param msg  A string message to pass into the callback.
+     * @param msg      A string message to pass into the callback.
+     * @param elapsed  A double indicating transmission length to pass into
+     *                 the callback.
      */
-    void fire_end_cb(const std::string &msg = {});
+    void fire_end_cb(const std::string &msg, double elapsed);
 
     /**
      * @brief Perform DMA-driven RF transmission.

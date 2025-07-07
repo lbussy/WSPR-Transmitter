@@ -210,8 +210,7 @@ WsprTransmitter::~WsprTransmitter()
  *   no completion notification is made.
  *   The callback uses the same variant format as the start callback.
  */
-void WsprTransmitter::setTransmissionCallbacks(Callback start_cb,
-                                               Callback end_cb)
+void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallback end_cb)
 {
     on_transmit_start_ = std::move(start_cb);
     on_transmit_end_ = std::move(end_cb);
@@ -520,18 +519,18 @@ void WsprTransmitter::printParameters()
  * @brief Invoke the start‐transmission callback with an empty message.
  *
  * @details Ensures the callback is valid before calling, providing an
- *          empty string to match the `Callback` signature.
+ *          empty string to match the `CallbackArg` signature.
  *
  * @param cb  The callback to invoke just before starting transmission.
  */
-inline void WsprTransmitter::fire_start_cb(const double frequency)
+inline void WsprTransmitter::fire_start_cb(const std::string &msg, const double frequency)
 {
     if (on_transmit_start_)
     {
-        // Launch callback on a detached thread:
-        std::thread([cb = on_transmit_start_, frequency]()
-                    { cb(frequency); })
-            .detach();
+        // Capture msg, frequency, and cb by value
+        std::thread([cb = on_transmit_start_, msg, frequency]()
+                    { cb(msg, frequency); })
+          .detach();
     }
 }
 
@@ -544,13 +543,12 @@ inline void WsprTransmitter::fire_start_cb(const double frequency)
  * @param cb   The callback to invoke immediately after transmission.
  * @param msg  The message string to pass into the callback.
  */
-inline void WsprTransmitter::fire_end_cb(const std::string &msg)
+inline void WsprTransmitter::fire_end_cb(const std::string &msg, double elapsed)
 {
     if (on_transmit_end_)
     {
-        // Launch callback on a detached thread:
-        std::thread([cb = on_transmit_end_, msg]()
-                    { cb(msg); })
+        std::thread([cb = on_transmit_end_, msg, elapsed]()
+                    { cb(msg, elapsed); })
             .detach();
     }
 }
@@ -574,7 +572,7 @@ void WsprTransmitter::transmit()
     // If we're not in tone‐test mode and frequency was zeroed out, skip.
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {
-        fire_end_cb("Skipping transmission (frequency = 0.0).");
+        fire_end_cb("Skipping transmission (frequency = 0.0).", 0.0);
         return;
     }
 
@@ -583,9 +581,9 @@ void WsprTransmitter::transmit()
     {
         if (debug)
         {
-            std::cerr << debug_tag << "transmit(): transmit() aborted before start." << std::endl;
+            std::cerr << debug_tag << "transmit() aborted before start." << std::endl;
         }
-        fire_end_cb("Transmission aborted before start.");
+        fire_end_cb("Transmission aborted before start.", 0.0);
         return;
     }
 
@@ -615,11 +613,14 @@ void WsprTransmitter::transmit()
     else
     {
         // Fire callback with frequency as an argument
-        fire_start_cb(trans_params_.frequency);
+        fire_start_cb("", trans_params_.frequency);
         // Transmit each symbol in the WSPR message
         const int symbol_count =
             static_cast<int>(trans_params_.symbols.size());
         struct timeval sym_start{}, diff{};
+
+        // Get start time for duration calculation
+        auto t0 = std::chrono::steady_clock::now();
 
         for (int i = 0; i < symbol_count; ++i)
         {
@@ -648,9 +649,14 @@ void WsprTransmitter::transmit()
                 bufPtr       // DMA buffer index
             );
         }
+        // Record end time and compute elapsed seconds
+        auto t1 = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(t1 - t0).count();
+        // Round to three decimal places:
+        elapsed = std::round(elapsed * 1000.0) / 1000.0;
 
         // Invoke the completion callback if set
-        fire_end_cb();
+        fire_end_cb("", elapsed);
     }
 
     // Disable PWM clock and stop transmission
