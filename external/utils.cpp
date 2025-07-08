@@ -26,76 +26,80 @@ double get_ppm_from_chronyc()
     std::array<char, 256> buffer{};
     std::string result;
 
+    // Open pipe to chronyc
     FILE *pipe = popen(cmd, "r");
     if (!pipe)
     {
-        throw std::runtime_error("Failed to run chronyc tracking.");
+        throw std::runtime_error(
+            std::string("Failed to run chronyc tracking: ") +
+            std::strerror(errno));
     }
 
+    // Accumulate all output
     while (fgets(buffer.data(), buffer.size(), pipe) != nullptr)
     {
         result += buffer.data();
     }
 
+    // Close pipe and inspect exit status
     int status = pclose(pipe);
-
     if (status == -1)
     {
-        if (errno == ECHILD)
-        {
-            // Treat as success
-            ;
-            ;
-        }
-        else
+        if (errno != ECHILD)
         {
             std::ostringstream err;
-            err << "pclose() failed while closing pipe to chronyc.\n";
-            err << "errno = " << errno << " (" << std::strerror(errno) << ")\n";
-            err << "Command output:\n"
+            err << "pclose() failed: errno=" << errno
+                << " (" << std::strerror(errno) << ")\nOutput:\n"
                 << result;
             throw std::runtime_error(err.str());
         }
+        // Ignore ECHILD per POSIX
     }
     else if (WIFEXITED(status))
     {
         int exit_code = WEXITSTATUS(status);
+        if (exit_code == 127)
+        {
+            throw std::runtime_error(
+                "chronyc not found; please install chrony");
+        }
         if (exit_code != 0)
         {
             std::ostringstream err;
-            err << "chronyc tracking exited with status " << exit_code << ".\n";
-            err << "Command output:\n"
+            err << "chronyc tracking exited with status "
+                << exit_code << "\nOutput:\n"
                 << result;
             throw std::runtime_error(err.str());
         }
     }
     else if (WIFSIGNALED(status))
     {
-        int signal = WTERMSIG(status);
+        int sig = WTERMSIG(status);
         std::ostringstream err;
-        err << "chronyc tracking terminated by signal " << signal << ".\n";
-        err << "Command output:\n"
+        err << "chronyc tracking killed by signal "
+            << sig << "\nOutput:\n"
             << result;
         throw std::runtime_error(err.str());
     }
 
-    // Parse "Frequency" line
+    // Scan for the Frequency line
     std::istringstream iss(result);
     std::string line;
     while (std::getline(iss, line))
     {
         if (line.find("Frequency") != std::string::npos)
         {
-            std::istringstream linestream(line);
-            std::string label, colon;
+            std::istringstream ls(line);
+            std::string label, colon, units;
             double ppm;
-            std::string units;
-
-            linestream >> label >> colon >> ppm >> units;
-            std::cout << "PPM set to: " << std::fixed << std::setprecision(3) << ppm << std::endl;
+            ls >> label >> colon >> ppm >> units;
+            std::cout << "PPM set to: "
+                      << std::fixed << std::setprecision(3)
+                      << ppm << '\n';
             return ppm;
         }
     }
 
-    throw std::runtime_error("Frequency line not found in chronyc tracking output.");
+    throw std::runtime_error(
+        "Frequency line not found in chronyc tracking output");
 }
