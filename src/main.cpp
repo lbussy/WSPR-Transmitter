@@ -19,11 +19,15 @@
 #include <termios.h> // tcgetattr(), tcsetattr()
 #include <unistd.h>  // STDIN_FILENO
 
+static constexpr std::string_view CALLSIGN   = "AA0NT";
+static constexpr std::string_view GRID= "EM18";
+static constexpr uint8_t POWER_DBM = 20;
+
 // Frequency choices
 static constexpr double _80m = 3568600.0;
 static constexpr double _40m = 7038600.0;
 static constexpr double _20m = 14095600.0;
-static constexpr double freq_ = _20m;
+static constexpr double FREQ = _80m;
 
 // Thread tracking/execution
 static std::mutex g_end_mtx;
@@ -305,12 +309,12 @@ int main()
 
         // Set minimum transmission data
         wsprTransmitter.setupTransmission(
-            freq_, 0, config.ppm,
-            "AA0NT", "EM18", 20, /*use_offset=*/true);
+            FREQ, 0, config.ppm,
+            CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
     }
     else
     {
-        wsprTransmitter.setupTransmission(freq_, 0, config.ppm);
+        wsprTransmitter.setupTransmission(FREQ, 0, config.ppm);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT
