@@ -159,6 +159,25 @@ namespace
         std::uintptr_t bus() const { return bus_addr_; }
     };
 
+    // Sleep until absolute monotonic‐clock time `ts_target`
+    static inline void sleep_until_abs(const struct timespec &ts_target)
+    {
+        int err;
+        while ((err = clock_nanosleep(
+                    CLOCK_MONOTONIC,
+                    TIMER_ABSTIME,
+                    &ts_target,
+                    nullptr)) == EINTR)
+        {
+            // Retry if interrupted by a signal
+        }
+        if (err != 0)
+        {
+            throw std::system_error(err,
+                                    std::generic_category(),
+                                    "WsprTransmitter: clock_nanosleep failed");
+        }
+    }
 } // end anonymous namespace
 
 /**
@@ -243,8 +262,8 @@ void WsprTransmitter::setupTransmission(
     double frequency,
     int power,
     double ppm,
-    std::string call_sign,
-    std::string grid_square,
+    std::string_view call_sign,
+    std::string_view grid_square,
     int power_dbm,
     bool use_offset)
 {
@@ -599,7 +618,7 @@ void WsprTransmitter::transmit()
         {
             transmit_symbol(
                 0,       // Symbol number
-                0.0,     // Test‐tone
+                0.0,     // Test-tone
                 dummyBuf // DMA buffer index
             );
         }
@@ -613,21 +632,33 @@ void WsprTransmitter::transmit()
         // Fire callback with frequency as an argument
         fire_start_cb("", trans_params_.frequency);
 
-        // Transmit each symbol in the WSPR message
-        const int symbol_count =
-            static_cast<int>(trans_params_.symbols.size());
+        // Capture both a chrono and a timespec timestamp at start
+        auto t0_chrono = std::chrono::steady_clock::now();
+        struct timespec t0_ts;
+        clock_gettime(CLOCK_MONOTONIC, &t0_ts);
 
+        const int symbol_count = static_cast<int>(trans_params_.symbols.size());
         const double symtime = trans_params_.symtime; // e.g. 0.682667 s
-        const auto sym_dur = std::chrono::duration<double>(symtime);
-        const auto t0 = std::chrono::steady_clock::now();
 
+        // Begin transmission
         transmit_on();
         for (int i = 0; i < symbol_count && !stop_requested_.load(); ++i)
         {
-            auto ideal = t0 + sym_dur * i;
-            std::this_thread::sleep_until(ideal);
+            // Compute absolute target time = t0_ts + i * symtime
+            long offset_ns = static_cast<long>(i * symtime * 1e9);
+            struct timespec target = t0_ts;
+            target.tv_sec += offset_ns / 1000000000;
+            target.tv_nsec += offset_ns % 1000000000;
+            if (target.tv_nsec >= 1000000000)
+            {
+                target.tv_sec++;
+                target.tv_nsec -= 1000000000;
+            }
 
-            // Now emit exactly symtime’s worth of symbol i
+            // Sleep until the exact slot
+            sleep_until_abs(target);
+
+            // Emit symbol i for exactly symtime seconds
             transmit_symbol(
                 static_cast<int>(trans_params_.symbols[i]),
                 symtime,
@@ -635,17 +666,14 @@ void WsprTransmitter::transmit()
         }
         transmit_off();
 
-        // Measure actual elapsed time
+        // Measure actual elapsed time in seconds, round to 3 decimals
         auto t1 = std::chrono::steady_clock::now();
-        double total = std::chrono::duration<double>(t1 - t0).count();
+        double total = std::chrono::duration<double>(t1 - t0_chrono).count();
         total = std::round(total * 1000.0) / 1000.0;
 
         // Invoke the completion callback if set
         fire_end_cb("", total);
     }
-
-    // Disable PWM clock and stop transmission
-    transmit_off();
 }
 
 /**
