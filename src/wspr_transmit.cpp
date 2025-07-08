@@ -210,8 +210,7 @@ WsprTransmitter::~WsprTransmitter()
  *   no completion notification is made.
  *   The callback uses the same variant format as the start callback.
  */
-void WsprTransmitter::setTransmissionCallbacks(Callback start_cb,
-                                               Callback end_cb)
+void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallback end_cb)
 {
     on_transmit_start_ = std::move(start_cb);
     on_transmit_end_ = std::move(end_cb);
@@ -520,17 +519,17 @@ void WsprTransmitter::printParameters()
  * @brief Invoke the start‐transmission callback with an empty message.
  *
  * @details Ensures the callback is valid before calling, providing an
- *          empty string to match the `Callback` signature.
+ *          empty string to match the `CallbackArg` signature.
  *
  * @param cb  The callback to invoke just before starting transmission.
  */
-inline void WsprTransmitter::fire_start_cb(const double frequency)
+inline void WsprTransmitter::fire_start_cb(const std::string &msg, const double frequency)
 {
     if (on_transmit_start_)
     {
-        // Launch callback on a detached thread:
-        std::thread([cb = on_transmit_start_, frequency]()
-                    { cb(frequency); })
+        // Capture msg, frequency, and cb by value
+        std::thread([cb = on_transmit_start_, msg, frequency]()
+                    { cb(msg, frequency); })
             .detach();
     }
 }
@@ -544,13 +543,12 @@ inline void WsprTransmitter::fire_start_cb(const double frequency)
  * @param cb   The callback to invoke immediately after transmission.
  * @param msg  The message string to pass into the callback.
  */
-inline void WsprTransmitter::fire_end_cb(const std::string &msg)
+inline void WsprTransmitter::fire_end_cb(const std::string &msg, double elapsed)
 {
     if (on_transmit_end_)
     {
-        // Launch callback on a detached thread:
-        std::thread([cb = on_transmit_end_, msg]()
-                    { cb(msg); })
+        std::thread([cb = on_transmit_end_, msg, elapsed]()
+                    { cb(msg, elapsed); })
             .detach();
     }
 }
@@ -574,7 +572,7 @@ void WsprTransmitter::transmit()
     // If we're not in tone‐test mode and frequency was zeroed out, skip.
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {
-        fire_end_cb("Skipping transmission (frequency = 0.0).");
+        fire_end_cb("Skipping transmission (frequency = 0.0).", 0.0);
         return;
     }
 
@@ -583,74 +581,67 @@ void WsprTransmitter::transmit()
     {
         if (debug)
         {
-            std::cerr << debug_tag << "transmit(): transmit() aborted before start." << std::endl;
+            std::cerr << debug_tag << "transmit() aborted before start." << std::endl;
         }
-        fire_end_cb("Transmission aborted before start.");
+        fire_end_cb("Transmission aborted before start.", 0.0);
         return;
     }
-
-    // Record reference time for scheduling
-    struct timeval tv_begin{};
-    gettimeofday(&tv_begin, nullptr);
-
-    // Initialize DMA buffer index
-    int bufPtr = 0;
-
-    // Enable PWM clock and DMA transmission
-    transmit_on();
 
     // Choose tone vs WSPR
     if (trans_params_.is_tone)
     {
+        int dummyBuf = 0;
+
+        // Enable PWM clock and DMA transmission
+        transmit_on();
         // Continuous tone loop — exit as soon as stop_requested_ is true
         while (!stop_requested_.load())
         {
             transmit_symbol(
-                0,     // symbol number
-                0.0,   // test‐tone
-                bufPtr // DMA buffer index
+                0,       // Symbol number
+                0.0,     // Test‐tone
+                dummyBuf // DMA buffer index
             );
         }
+        transmit_off();
     }
     else
     {
+        // Initialize DMA buffer index
+        int bufPtr = 0;
+
         // Fire callback with frequency as an argument
-        fire_start_cb(trans_params_.frequency);
+        fire_start_cb("", trans_params_.frequency);
+
         // Transmit each symbol in the WSPR message
         const int symbol_count =
             static_cast<int>(trans_params_.symbols.size());
-        struct timeval sym_start{}, diff{};
 
-        for (int i = 0; i < symbol_count; ++i)
+        const double symtime = trans_params_.symtime; // e.g. 0.682667 s
+        const auto sym_dur = std::chrono::duration<double>(symtime);
+        const auto t0 = std::chrono::steady_clock::now();
+
+        transmit_on();
+        for (int i = 0; i < symbol_count && !stop_requested_.load(); ++i)
         {
-            // Check for stop between symbols
-            if (stop_requested_.load())
-            {
-                break;
-            }
+            auto ideal = t0 + sym_dur * i;
+            std::this_thread::sleep_until(ideal);
 
-            // Compute elapsed time since tv_begin
-            gettimeofday(&sym_start, nullptr);
-            symbol_timeval_subtract(&diff, &sym_start, &tv_begin);
-            double elapsed = diff.tv_sec + diff.tv_usec / 1e6;
-            double sched_end = (i + 1) * trans_params_.symtime;
-            double time_symbol = sched_end - elapsed;
-            time_symbol = std::clamp(
-                time_symbol,
-                0.2,
-                2.0 * trans_params_.symtime);
-
-            // Transmit the current symbol
-            int symbol = static_cast<int>(trans_params_.symbols[i]);
+            // Now emit exactly symtime’s worth of symbol i
             transmit_symbol(
-                symbol,      // symbol index
-                time_symbol, // scheduled duration
-                bufPtr       // DMA buffer index
-            );
+                static_cast<int>(trans_params_.symbols[i]),
+                symtime,
+                bufPtr);
         }
+        transmit_off();
+
+        // Measure actual elapsed time
+        auto t1 = std::chrono::steady_clock::now();
+        double total = std::chrono::duration<double>(t1 - t0).count();
+        total = std::round(total * 1000.0) / 1000.0;
 
         // Invoke the completion callback if set
-        fire_end_cb();
+        fire_end_cb("", total);
     }
 
     // Disable PWM clock and stop transmission
@@ -786,6 +777,22 @@ inline double WsprTransmitter::convert_mw_dbm(double mw)
  */
 void WsprTransmitter::thread_entry()
 {
+    // Pin this thread to CPU 0
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    CPU_SET(0, &cpus);
+    int aff_ret = pthread_setaffinity_np(pthread_self(),
+                                         sizeof(cpus),
+                                         &cpus);
+    if (aff_ret != 0)
+    {
+        // Affinity failed; warn but continue
+        std::cerr << debug_tag
+                  << "thread_entry(): failed to set CPU affinity: "
+                  << std::strerror(aff_ret)
+                  << std::endl;
+    }
+
     // Bump our own scheduling parameters first:
     try
     {

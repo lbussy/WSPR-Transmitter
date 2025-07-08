@@ -25,10 +25,6 @@ static constexpr double _40m = 7038600.0;
 static constexpr double _20m = 14095600.0;
 static constexpr double freq_ = _20m;
 
-// Time/duration tracking
-std::chrono::high_resolution_clock::time_point start_time;
-std::chrono::duration<double> elapsed;
-
 // Thread tracking/execution
 static std::mutex g_end_mtx;
 static std::condition_variable g_end_cv;
@@ -173,46 +169,82 @@ void sig_handler(int)
     write(sig_pipe_fds[1], &wake, 1);
 }
 
-void start_cb(const std::string &msg = {})
+/**
+ * @brief Print a transmission start message.
+ *
+ * This callback prints to stdout a notice that transmission has begun.
+ * If both a descriptive message and frequency are provided, it prints
+ * both. Otherwise it prints whichever is available, or a default notice
+ * if neither is provided.
+ *
+ * @param msg          Transmission descriptor string; may be empty.
+ * @param frequency    Frequency in Hz; zero indicates no frequency.
+ */
+void start_cb(const std::string &msg, double frequency)
 {
-    start_time = std::chrono::high_resolution_clock::now();
-
-    if (!msg.empty())
+    if (!msg.empty() && frequency != 0.0)
     {
-        // Print with frequency as string
-        std::cout << "Started transmission (" << msg << ")." << std::endl;
+        std::cout << "[Callback] Started transmission (" << msg << ") "
+                  << std::setprecision(6)
+                  << (frequency / 1e6) << " MHz."
+                  << std::endl;
+    }
+    else if (frequency != 0.0)
+    {
+        std::cout << "[Callback] Started transmission: "
+                  << std::setprecision(6)
+                  << (frequency / 1e6) << " MHz."
+                  << std::endl;
+    }
+    else if (!msg.empty())
+    {
+        std::cout << "[Callback] Started transmission ("
+                  << msg << ")."
+                  << std::endl;
     }
     else
     {
-       std::cout << "Started transmission." << std::endl;
+        std::cout << "[Callback] Started transmission.\n";
     }
 }
 
-void start_cb(double frequency_hz)
+/**
+ * @brief Callback invoked when a transmission finishes.
+ *
+ * Prints a completion message to stdout that includes an optional
+ * descriptor and the elapsed time in seconds (to three decimal places).
+ * Then it sets the global flag `g_transmission_done` to true under lock
+ * and notifies the condition variable `g_end_cv`.
+ *
+ * @param msg     Descriptor string for the transmission; may be empty.
+ * @param elapsed Duration of the transmission in seconds; zero indicates
+ *                no timing information.
+ */
+void end_cb(const std::string &msg, double elapsed)
 {
-    // convert Hz → MHz
-    double frequency_mhz = frequency_hz / 1e6;
-
-    std::ostringstream oss;
-    oss << std::fixed
-        << std::setprecision(6)
-        << frequency_mhz
-        << " MHz";
-
-    start_cb(oss.str());
-}
-
-void end_cb(const std::string &msg = {})
-{
-    elapsed = std::chrono::high_resolution_clock::now() - start_time;
-
-    if (msg.length() <= 1)
+    if (!msg.empty() && elapsed != 0.0)
     {
-        std::cout << "[CALLBACK] Completed transmission." << std::endl;
+        std::cout << "[Callback] Completed transmission (" << msg << ") "
+                  << std::setprecision(3)
+                  << elapsed << " seconds."
+                  << std::endl;
+    }
+    else if (elapsed != 0.0)
+    {
+        std::cout << "[Callback] Completed transmission: "
+                  << std::setprecision(3)
+                  << elapsed << " seconds."
+                  << std::endl;
+    }
+    else if (!msg.empty())
+    {
+        std::cout << "[Callback] Completed transmission ("
+                  << msg << ")."
+                  << std::endl;
     }
     else
     {
-        std::cout << "[CALLBACK] Completed transmission (" << msg << ")." << std::endl;
+        std::cout << "[Callback] Completed transmission." << std::endl;
     }
 
     {
@@ -255,20 +287,20 @@ int main()
     config.ppm = get_ppm_from_chronyc();
 
     // Set transmission server and set priority
-    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 40);
+    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 50);
 
     // Configure transmitter
     if (isWspr)
     {
-        // Set transmission event callbacks
         wsprTransmitter.setTransmissionCallbacks(
-            [](const WsprTransmitter::CallbackArg &arg)
+            [](const std::string &msg, double frequency)
             {
-                start_cb(std::get<double>(arg));
+                start_cb(msg, frequency);
             },
-            [](const WsprTransmitter::CallbackArg &arg)
+
+            [](const std::string &msg, double elapsed_secs)
             {
-                end_cb(std::get<std::string>(arg));
+                end_cb(msg, elapsed_secs);
             });
 
         // Set minimum transmission data
@@ -319,9 +351,6 @@ int main()
         {
             std::cout << "Interrupted. Aborting WSPR transmission." << std::endl;
         }
-        std::cout << "Elapsed time: "
-                  << std::fixed << std::setprecision(3)
-                  << elapsed.count() << " seconds." << std::endl;
     }
     else
     {
