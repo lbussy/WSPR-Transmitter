@@ -39,6 +39,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -144,12 +145,12 @@ public:
      */
     void setupTransmission(
         double frequency,
-        int power = 0,
-        double ppm = 0.0,
-        std::string call_sign = "",
-        std::string grid_square = "",
-        int power_dbm = 0,
-        bool use_offset = false);
+        int power,
+        double ppm,
+        std::string_view call_sign   = {},
+        std::string_view grid_square = {},
+        int power_dbm                = 0,
+        bool use_offset              = false);
 
     /**
      * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.

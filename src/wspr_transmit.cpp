@@ -243,8 +243,8 @@ void WsprTransmitter::setupTransmission(
     double frequency,
     int power,
     double ppm,
-    std::string call_sign,
-    std::string grid_square,
+    std::string_view call_sign,
+    std::string_view grid_square,
     int power_dbm,
     bool use_offset)
 {
