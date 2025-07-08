@@ -287,7 +287,7 @@ int main()
     config.ppm = get_ppm_from_chronyc();
 
     // Set transmission server and set priority
-    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 40);
+    wsprTransmitter.setThreadScheduling(SCHED_FIFO, 50);
 
     // Configure transmitter
     if (isWspr)
