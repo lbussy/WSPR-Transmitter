@@ -9,6 +9,7 @@ SUDO := sudo
 # Add any required submodules by their src path
 SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Message/src)
 SUBMODULE_SRCDIRS += $(wildcard ../../Mailbox/src)
+SUBMODULE_SRCDIRS += $(wildcard ../../MorseCodeGenerator/src)
 SUBMODULE_SRCDIRS += $(wildcard ../external)
 
 # Get project name from Git, revert to directory name
