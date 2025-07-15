@@ -2,32 +2,41 @@
 #include "config_handler.hpp"
 #include "utils.hpp"
 #include "wspr_transmit.hpp"
+#include "MorseCodeGenerator.hpp"
 
 // C++ Standard Library
-#include <array>              // std::array for signal list
-#include <chrono>             // std::chrono
-#include <condition_variable> // g_end_cv
-#include <csignal>            // sigaction, std::signal
-#include <cstring>            // strsignal()
-#include <cstdio>             // getchar()
-#include <iomanip>            // std::ostringstream
-#include <iostream>           // std::cout, std::getline
-#include <mutex>              // g_end_mtx
-#include <string>             // std::string
+#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <csignal>
+#include <cstring>
+#include <cstdio>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <string>
 
 // POSIX & System-Specific Headers
-#include <termios.h> // tcgetattr(), tcsetattr()
-#include <unistd.h>  // STDIN_FILENO
+#include <termios.h>
+#include <unistd.h>
 
-static constexpr std::string_view CALLSIGN   = "AA0NT";
-static constexpr std::string_view GRID= "EM18";
+static constexpr std::string_view CALLSIGN = "AA0NT";
+static constexpr std::string_view GRID = "EM18";
 static constexpr uint8_t POWER_DBM = 20;
+static constexpr std::string_view QRSS_MESSAGE = "AA0NT EM18";
+static constexpr uint8_t DIT_LENGTH = 3;
 
-// Frequency choices
-static constexpr double _80m = 3568600.0;
-static constexpr double _40m = 7038600.0;
-static constexpr double _20m = 14095600.0;
-static constexpr double FREQ = _80m;
+// WSPR Frequency choices
+static constexpr double WSPR_80M = 3568600.0;
+static constexpr double WSPR_40M = 7038600.0;
+static constexpr double WSPR_20M = 14095600.0;
+static constexpr double WSPR_FREQ = WSPR_80M;
+
+// QRSS Frequency choices
+static constexpr double QRSS_80M = 3569900.0;
+static constexpr double QRSS_40M = 7039900.0;
+static constexpr double QRSS_20M = 14096900.0;
+static constexpr double QRSS_FREQ = QRSS_80M;
 
 // Thread tracking/execution
 static std::mutex g_end_mtx;
@@ -58,35 +67,21 @@ struct TermiosGuard
     }
 };
 
-/**
- * @brief Reads a single character from standard input without waiting for Enter.
- *
- * This function configures the terminal for noncanonical mode to read a single
- * character immediately. It then restores the terminal settings.
- *
- * @return The character read from standard input.
- */
 int getch()
 {
     struct termios oldAttr, newAttr;
-    tcgetattr(STDIN_FILENO, &oldAttr); // Get terminal attributes
+    tcgetattr(STDIN_FILENO, &oldAttr);
     newAttr = oldAttr;
-    newAttr.c_lflag &= ~(ICANON | ECHO);        // Disable canonical mode and echo
-    tcsetattr(STDIN_FILENO, TCSANOW, &newAttr); // Set new terminal attributes
+    newAttr.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newAttr);
     int ch = getchar();
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldAttr); // Restore old terminal attributes
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldAttr);
     return ch;
 }
 
-/**
- * @brief Pauses the program until the user presses the spacebar.
- *
- * Blocks until either the user hits SPACE, or we get signaled on our pipe.
- */
 void wait_for_space_or_signal()
 {
-    TermiosGuard tguard; // Switch to non-canonical mode for the duration
-
+    TermiosGuard tguard;
     char c;
     while (!g_terminate.load(std::memory_order_acquire))
     {
@@ -104,10 +99,7 @@ void wait_for_space_or_signal()
         }
 
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
-        {
-            // Signal arrived — bail out
             break;
-        }
         if (FD_ISSET(STDIN_FILENO, &rfds))
         {
             if (::read(STDIN_FILENO, &c, 1) == 1 && c == ' ')
@@ -116,13 +108,14 @@ void wait_for_space_or_signal()
     }
 }
 
-bool select_wspr()
+int select_mode()
 {
-    TermiosGuard tg; // Raw input
+    TermiosGuard tg;
     std::cout << "Select mode:\n"
               << "  1) WSPR\n"
               << "  2) TONE\n"
-              << "Enter [1/2]: " << std::flush;
+              << "  3) QRSS\n"
+              << "Enter [1/2/3]: " << std::flush;
 
     fd_set rfds;
     while (!g_terminate.load())
@@ -141,9 +134,8 @@ bool select_wspr()
         }
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
         {
-            // Got Ctrl-C
             std::cout << std::endl;
-            return false; // Or exit early
+            return -1;
         }
         if (FD_ISSET(STDIN_FILENO, &rfds))
         {
@@ -151,15 +143,18 @@ bool select_wspr()
             if (::read(STDIN_FILENO, &c, 1) == 1)
             {
                 std::cout << std::endl;
+                if (c == '1')
+                    return 1;
                 if (c == '2')
-                    return false;
-                else
-                    return true; // Default to 1/WSPR
+                    return 2;
+                if (c == '3')
+                    return 3;
+                return -1;
             }
         }
     }
     std::cout << std::endl;
-    return false;
+    return -1;
 }
 
 void sig_handler(int)
@@ -168,27 +163,15 @@ void sig_handler(int)
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
     wsprTransmitter.stop();
     g_terminate.store(true);
-    // Wake any select()/poll() on your self-pipe
     const char wake = 1;
     write(sig_pipe_fds[1], &wake, 1);
 }
 
-/**
- * @brief Print a transmission start message.
- *
- * This callback prints to stdout a notice that transmission has begun.
- * If both a descriptive message and frequency are provided, it prints
- * both. Otherwise it prints whichever is available, or a default notice
- * if neither is provided.
- *
- * @param msg          Transmission descriptor string; may be empty.
- * @param frequency    Frequency in Hz; zero indicates no frequency.
- */
 void start_cb(const std::string &msg, double frequency)
 {
     if (!msg.empty() && frequency != 0.0)
     {
-        std::cout << "[Callback] Started transmission (" << msg << ") "
+        std::cout << "[Callback] Started transmission (" << msg << ") at "
                   << std::setprecision(6)
                   << (frequency / 1e6) << " MHz."
                   << std::endl;
@@ -212,18 +195,6 @@ void start_cb(const std::string &msg, double frequency)
     }
 }
 
-/**
- * @brief Callback invoked when a transmission finishes.
- *
- * Prints a completion message to stdout that includes an optional
- * descriptor and the elapsed time in seconds (to three decimal places).
- * Then it sets the global flag `g_transmission_done` to true under lock
- * and notifies the condition variable `g_end_cv`.
- *
- * @param msg     Descriptor string for the transmission; may be empty.
- * @param elapsed Duration of the transmission in seconds; zero indicates
- *                no timing information.
- */
 void end_cb(const std::string &msg, double elapsed)
 {
     if (!msg.empty() && elapsed != 0.0)
@@ -236,7 +207,7 @@ void end_cb(const std::string &msg, double elapsed)
     else if (elapsed != 0.0)
     {
         std::cout << "[Callback] Completed transmission: "
-                  << std::setprecision(3)
+                  << std::setprecision(4)
                   << elapsed << " seconds."
                   << std::endl;
     }
@@ -266,7 +237,6 @@ int main()
         return 1;
     }
 
-    // Set up signals
     std::array<int, 6> signals = {SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT};
     for (int s : signals)
     {
@@ -278,69 +248,67 @@ int main()
     }
     std::signal(SIGCHLD, SIG_IGN);
 
-    // Pick mode
-    bool isWspr = select_wspr();
-    if (g_terminate.load(std::memory_order_acquire))
-    {
-        // We saw Ctrl-C in the prompt, so bail out immediately
+    int mode = select_mode();
+    if (mode == -1 || g_terminate.load(std::memory_order_acquire))
         return 0;
-    }
-    std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << std::endl;
 
-    // Get PPM correction and schedule priority
     config.ppm = get_ppm_from_chronyc();
-
-    // Set transmission server and set priority
     wsprTransmitter.setThreadScheduling(SCHED_FIFO, 50);
+    wsprTransmitter.setTransmissionCallbacks(start_cb, end_cb);
 
-    // Configure transmitter
-    if (isWspr)
+    if (mode == 1)
     {
-        wsprTransmitter.setTransmissionCallbacks(
-            [](const std::string &msg, double frequency)
-            {
-                start_cb(msg, frequency);
-            },
-
-            [](const std::string &msg, double elapsed_secs)
-            {
-                end_cb(msg, elapsed_secs);
-            });
-
-        // Set minimum transmission data
         wsprTransmitter.setupTransmission(
-            FREQ, 0, config.ppm,
-            CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
+            WSPR_FREQ, 0, config.ppm,
+            CALLSIGN, GRID, POWER_DBM, true);
     }
-    else
+    else if (mode == 2)
     {
-        wsprTransmitter.setupTransmission(FREQ, 0, config.ppm);
+        wsprTransmitter.setupTransmission(WSPR_FREQ, 0, config.ppm);
+    }
+    else if (mode == 3)
+    {
+        std::cout << "QRSS Payload:      '" << QRSS_MESSAGE << "'" << std::endl;
+        wsprTransmitter.setSymbolCallback(
+            [](char sym, std::chrono::nanoseconds duration)
+            {
+                std::cout << "[QRSS Symbol] '" << sym
+                        << "' duration: " << std::fixed << std::setprecision(3)
+                        << duration.count() / 1e6 << "ms." << std::endl;
+            });
+        MorseCodeGenerator morseTx;
+        morseTx.setMessage(QRSS_MESSAGE);
+        std::string morseString = morseTx.getMessage();
+        wsprTransmitter.setupTransmissionQRSS(morseString, QRSS_FREQ, DIT_LENGTH);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT
     wsprTransmitter.printParameters();
 #endif
-    std::cout << "Setup for " << (isWspr ? "WSPR" : "tone") << " complete." << std::endl;
+    std::cout << "Setup for ";
+    if (mode == 1)
+        std::cout << "WSPR";
+    else if (mode == 2)
+        std::cout << "tone";
+    else
+        std::cout << "QRSS";
+    std::cout << " complete." << std::endl;
 
-    // For tone mode, wait to start
-    if (isWspr)
+    if (mode == 1)
     {
         std::cout << "Waiting for next transmission window." << std::endl;
     }
     else
     {
-        std::cout << "Press <spacebar> to begin test tone." << std::endl;
+        std::cout << "Press <spacebar> to begin test." << std::endl;
         wait_for_space_or_signal();
     }
 
-    // Kick off the scheduler/transmission thread
     wsprTransmitter.enableTransmission();
 
-    if (isWspr)
+    if (mode == 1)
     {
         std::unique_lock<std::mutex> lk(g_end_mtx);
-
-        // Wake every 100 ms to check for either completion or a Ctrl-C.
         while (!g_transmission_done &&
                !g_terminate.load(std::memory_order_acquire))
         {
@@ -358,13 +326,11 @@ int main()
     }
     else
     {
-        // Tone mode: Stop on spacebar
-        std::cout << "Press <spacebar> to end test tone." << std::endl;
+        std::cout << "Press <spacebar> to end test." << std::endl;
         wait_for_space_or_signal();
-        std::cout << "Test tone stopped." << std::endl;
+        std::cout << "Test ended." << std::endl;
     }
 
-    // Teardown
     wsprTransmitter.stop();
     return 0;
 }

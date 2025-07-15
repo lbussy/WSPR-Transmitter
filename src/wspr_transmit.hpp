@@ -93,6 +93,15 @@ public:
     WsprTransmitter(WsprTransmitter &&) = delete;
     WsprTransmitter &operator=(WsprTransmitter &&) = delete;
 
+    enum class Mode
+    {
+        TONE,
+        WSPR,
+        QRSS,
+        FSKCW,
+        DFCW
+    };
+
     /**
      * @brief Signature for user-provided transmission callbacks.
      *
@@ -147,10 +156,16 @@ public:
         double frequency,
         int power,
         double ppm,
-        std::string_view call_sign   = {},
+        std::string_view call_sign = {},
         std::string_view grid_square = {},
-        int power_dbm                = 0,
-        bool use_offset              = false);
+        int power_dbm = 0,
+        bool use_offset = false);
+
+    // Setup method for QRSS
+    void setupTransmissionQRSS(
+        std::string_view cw_message,
+        double frequency,
+        int unit_seconds);
 
     /**
      * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
@@ -179,7 +194,7 @@ public:
      * @brief Start transmission, either immediately or via the scheduler.
      *
      * @details
-     *   If `trans_params_.is_tone == true`, this will spawn the transmit
+     *   If `trans_params_.mode == Mode::TONE == true`, this will spawn the transmit
      *   thread right away (bypassing the scheduler). Otherwise it launches
      *   the background scheduler, which will fire at the next WSPR window
      *   and then spawn the transmit thread.
@@ -239,7 +254,13 @@ public:
      */
     void printParameters();
 
+    // TODO: Symbol timing callback
+    void setSymbolCallback(std::function<void(char, std::chrono::nanoseconds)> cb);
+
 private:
+    // TODO: Symbol timing callback
+    std::function<void(char, std::chrono::nanoseconds)> symbol_cb_;
+
     /**
      * @brief Invoked just before each transmission begins.
      *
@@ -497,46 +518,43 @@ private:
     static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
         2, 4, 6, 8, 10, 12, 14, 16};
 
+    // Mode tracking and QRSS parameters
+    int qrss_unit_length_ = 1;
+
     /**
-     * @brief Structure containing parameters for a WSPR transmission.
+     * @brief Structure containing parameters for a transmission.
      *
      * This structure encapsulates all the necessary parameters required to configure
-     * and execute a WSPR transmission, including the message, transmission frequency,
-     * symbol time, tone spacing, and the DMA frequency lookup table.
+     * and execute a transmission, supporting WSPR, QRSS, and tone-only test modes.
      */
     struct WsprTransmissionParams
     {
-        static const std::size_t symbol_count = MSG_SIZE;
-        std::array<uint8_t, symbol_count> symbols;
+        // General transmission parameters
+        Mode mode = Mode::WSPR;  ///< Transmission mode (WSPR, QRSS, TONE, etc.)
+        double frequency = 0.0;  ///< Transmission frequency in Hz
+        double ppm = 0.0;        ///< PPM correction for clock accuracy
+        int power = 0;           ///< GPIO power level (0–7)
+        bool use_offset = false; ///< Use random frequency offset (WSPR only)
 
-        std::string call_sign;              ///< Callsign of operator
-        std::string grid_square;            ///< Maidenhead grid square of origination
-        int power_dbm;                      ///< Reported transmission power in dBm
-        double frequency;                   ///< Transmission frequency in Hz.
-        double ppm;                         ///< Current system PPM adjustment
-        bool is_tone;                       ///< Is test tone
-        int power;                          ///< GPIO power level 0-7
-        double symtime;                     ///< Duration of each symbol in seconds.
-        double tone_spacing;                ///< Frequency spacing between adjacent tones in Hz.
-        std::vector<double> dma_table_freq; ///< DMA frequency lookup table.
-        bool use_offset;                    ///< Use random offset on transmissions
+        // WSPR-specific fields
+        std::string call_sign;     ///< Callsign of the operator
+        std::string grid_square;   ///< Maidenhead locator
+        int power_dbm = 0;         ///< Power reported in WSPR message (in dBm)
+        double symtime = 0.0;      ///< Symbol duration in seconds (e.g., 0.683)
+        double tone_spacing = 0.0; ///< Frequency spacing between WSPR tones in Hz
+
+        // QRSS-specific fields
+        std::string qrss_message = ""; ///< Morse message to send
+        int qrss_unit_length = 3;      ///< Duration of a dot (in seconds)
+
+        // Runtime buffers
+        std::vector<uint8_t> symbols;                                          ///< Encoded symbol sequence
+        std::vector<uint32_t> dma_table_freq = std::vector<uint32_t>(1024, 0); ///< DMA frequency table
 
         /**
          * @brief Default constructor for WsprTransmissionParams.
-         *
-         * Initializes the transmission parameters with default values.
          */
-        WsprTransmissionParams()
-            : symbols{},
-              frequency(0.0),
-              is_tone(false),
-              power(0),
-              symtime(0.0),
-              tone_spacing(0.0),
-              dma_table_freq(1024, 0.0),
-              use_offset(false)
-        {
-        }
+        WsprTransmissionParams() = default;
     };
 
     /**
@@ -750,10 +768,15 @@ private:
      *      and `timeval_subtract()` to schedule precise symbol timing.
      *   5. Disables transmission when complete.
      *
-     * @note In tone mode (`trans_params_.is_tone == true`), this function only
+     * @note In tone mode (`trans_params_.mode == Mode::TONE == true`), this function only
      *       returns via SIGINT.
      */
     void transmit();
+
+    // TODO:
+    void transmit_tone();
+    void transmit_wspr();
+    void transmit_qrss();
 
     /**
      * @brief Waits for the background transmission thread to finish.
