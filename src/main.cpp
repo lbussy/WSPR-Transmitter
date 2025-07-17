@@ -25,6 +25,7 @@ static constexpr std::string_view GRID = "EM18";
 static constexpr uint8_t POWER_DBM = 20;
 static constexpr std::string_view QRSS_MESSAGE = "AA0NT EM18";
 static constexpr uint8_t DIT_LENGTH = 3;
+static constexpr uint8_t GPIO_POWER = 7;
 
 // WSPR Frequency choices
 static constexpr double WSPR_80M = 3568600.0;
@@ -37,6 +38,9 @@ static constexpr double QRSS_80M = 3569900.0;
 static constexpr double QRSS_40M = 7039900.0;
 static constexpr double QRSS_20M = 14096900.0;
 static constexpr double QRSS_FREQ = QRSS_80M;
+
+// Debug print tag
+inline constexpr std::string_view main_debug_tag{"[Test Rig        ] "};
 
 // Thread tracking/execution
 static std::mutex g_end_mtx;
@@ -108,14 +112,14 @@ void wait_for_space_or_signal()
     }
 }
 
-int select_mode()
+WsprTransmitter::Mode select_mode()
 {
     TermiosGuard tg;
     std::cout << "Select mode:\n"
               << "  1) WSPR\n"
-              << "  2) TONE\n"
-              << "  3) QRSS\n"
-              << "Enter [1/2/3]: " << std::flush;
+              << "  2) QRSS\n"
+              << "  3) TONE\n"
+              << "Enter [1/2/3]: " << std::endl << std::flush;
 
     fd_set rfds;
     while (!g_terminate.load())
@@ -135,7 +139,7 @@ int select_mode()
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
         {
             std::cout << std::endl;
-            return -1;
+            return WsprTransmitter::Mode::UNKNOWN;
         }
         if (FD_ISSET(STDIN_FILENO, &rfds))
         {
@@ -144,22 +148,22 @@ int select_mode()
             {
                 std::cout << std::endl;
                 if (c == '1')
-                    return 1;
+                    return WsprTransmitter::Mode::WSPR;
                 if (c == '2')
-                    return 2;
+                    return WsprTransmitter::Mode::QRSS;
                 if (c == '3')
-                    return 3;
-                return -1;
+                    return WsprTransmitter::Mode::TONE;
+                return WsprTransmitter::Mode::UNKNOWN;
             }
         }
     }
     std::cout << std::endl;
-    return -1;
+    return WsprTransmitter::Mode::UNKNOWN;
 }
 
 void sig_handler(int)
 {
-    const char msg[] = "Caught signal\nShutting down transmissions.\n";
+    const char msg[] = "\n[Signal Handler  ] Caught signal\nShutting down transmissions.\n";
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
     wsprTransmitter.stop();
     g_terminate.store(true);
@@ -171,27 +175,30 @@ void start_cb(const std::string &msg, double frequency)
 {
     if (!msg.empty() && frequency != 0.0)
     {
-        std::cout << "[Callback] Started transmission (" << msg << ") at "
+        std::cout << main_debug_tag
+                  << "Started transmission (" << msg << ") at "
                   << std::setprecision(6)
                   << (frequency / 1e6) << " MHz."
                   << std::endl;
     }
     else if (frequency != 0.0)
     {
-        std::cout << "[Callback] Started transmission: "
+        std::cout << main_debug_tag
+                  << "Started transmission: "
                   << std::setprecision(6)
                   << (frequency / 1e6) << " MHz."
                   << std::endl;
     }
     else if (!msg.empty())
     {
-        std::cout << "[Callback] Started transmission ("
+        std::cout << main_debug_tag
+                  << "Started transmission ("
                   << msg << ")."
                   << std::endl;
     }
     else
     {
-        std::cout << "[Callback] Started transmission.\n";
+        std::cout << main_debug_tag << "Started transmission.\n";
     }
 }
 
@@ -199,27 +206,30 @@ void end_cb(const std::string &msg, double elapsed)
 {
     if (!msg.empty() && elapsed != 0.0)
     {
-        std::cout << "[Callback] Completed transmission (" << msg << ") "
+        std::cout << main_debug_tag
+                  << "Completed transmission (" << msg << ") "
                   << std::setprecision(3)
                   << elapsed << " seconds."
                   << std::endl;
     }
     else if (elapsed != 0.0)
     {
-        std::cout << "[Callback] Completed transmission: "
+        std::cout << main_debug_tag
+                  << "Completed transmission: "
                   << std::setprecision(4)
                   << elapsed << " seconds."
                   << std::endl;
     }
     else if (!msg.empty())
     {
-        std::cout << "[Callback] Completed transmission ("
+        std::cout << main_debug_tag
+                  << "Completed transmission ("
                   << msg << ")."
                   << std::endl;
     }
     else
     {
-        std::cout << "[Callback] Completed transmission." << std::endl;
+        std::cout << main_debug_tag << "Completed transmission." << std::endl;
     }
 
     {
@@ -248,65 +258,67 @@ int main()
     }
     std::signal(SIGCHLD, SIG_IGN);
 
-    int mode = select_mode();
-    if (mode == -1 || g_terminate.load(std::memory_order_acquire))
+    WsprTransmitter::Mode mode = select_mode();
+    if (mode == WsprTransmitter::Mode::UNKNOWN || g_terminate.load(std::memory_order_acquire))
         return 0;
 
     config.ppm = get_ppm_from_chronyc();
     wsprTransmitter.setThreadScheduling(SCHED_FIFO, 50);
     wsprTransmitter.setTransmissionCallbacks(start_cb, end_cb);
 
-    if (mode == 1)
+    if (mode == WsprTransmitter::Mode::WSPR)
     {
-        wsprTransmitter.setupTransmission(
-            WSPR_FREQ, 0, config.ppm,
+        wsprTransmitter.setupWSPRTransmission(
+            WSPR_FREQ, GPIO_POWER, config.ppm,
             CALLSIGN, GRID, POWER_DBM, true);
     }
-    else if (mode == 2)
+    else if (mode == WsprTransmitter::Mode::QRSS)
     {
-        wsprTransmitter.setupTransmission(WSPR_FREQ, 0, config.ppm);
-    }
-    else if (mode == 3)
-    {
-        std::cout << "QRSS Payload:      '" << QRSS_MESSAGE << "'" << std::endl;
+        std::cout << main_debug_tag << "QRSS Payload:      '" << QRSS_MESSAGE << "'" << std::endl;
         wsprTransmitter.setSymbolCallback(
             [](char sym, std::chrono::nanoseconds duration)
             {
-                std::cout << "[QRSS Symbol] '" << sym
-                        << "' duration: " << std::fixed << std::setprecision(3)
-                        << duration.count() / 1e6 << "ms." << std::endl;
+                std::cout << main_debug_tag
+                          << "Symbol: '"
+                          << sym
+                          << "' duration: " << std::fixed << std::setprecision(3)
+                          << duration.count() / 1e6 << "ms." << std::endl;
             });
         MorseCodeGenerator morseTx;
         morseTx.setMessage(QRSS_MESSAGE);
         std::string morseString = morseTx.getMessage();
-        wsprTransmitter.setupTransmissionQRSS(morseString, QRSS_FREQ, DIT_LENGTH);
+        wsprTransmitter.setupQRSSTransmission(morseString, QRSS_FREQ, DIT_LENGTH, config.ppm, GPIO_POWER);
+    }
+    else if (mode == WsprTransmitter::Mode::TONE)
+    {
+        wsprTransmitter.setupToneTransmission(WSPR_FREQ, GPIO_POWER, config.ppm);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT
     wsprTransmitter.printParameters();
 #endif
-    std::cout << "Setup for ";
-    if (mode == 1)
+    std::cout << main_debug_tag << "Setup for ";
+    if (mode == WsprTransmitter::Mode::WSPR)
         std::cout << "WSPR";
-    else if (mode == 2)
-        std::cout << "tone";
-    else
+    else if (mode == WsprTransmitter::Mode::QRSS)
         std::cout << "QRSS";
+    else
+        std::cout << "TONE";
     std::cout << " complete." << std::endl;
 
-    if (mode == 1)
+    if (mode == WsprTransmitter::Mode::WSPR)
     {
-        std::cout << "Waiting for next transmission window." << std::endl;
+        std::cout << main_debug_tag << "Waiting for next transmission window." << std::endl;
     }
     else
     {
-        std::cout << "Press <spacebar> to begin test." << std::endl;
+        std::cout << main_debug_tag << "Press <spacebar> to begin test." << std::endl;
         wait_for_space_or_signal();
     }
 
     wsprTransmitter.enableTransmission();
 
-    if (mode == 1)
+    if (mode == WsprTransmitter::Mode::WSPR)
     {
         std::unique_lock<std::mutex> lk(g_end_mtx);
         while (!g_transmission_done &&
@@ -317,18 +329,36 @@ int main()
 
         if (g_transmission_done)
         {
-            std::cout << "WSPR transmission complete." << std::endl;
+            std::cout << main_debug_tag << "WSPR transmission complete." << std::endl;
         }
         else
         {
-            std::cout << "Interrupted. Aborting WSPR transmission." << std::endl;
+            std::cout << main_debug_tag << "Interrupted. Aborting WSPR transmission." << std::endl;
         }
     }
-    else
+    else if (mode == WsprTransmitter::Mode::QRSS)
     {
-        std::cout << "Press <spacebar> to end test." << std::endl;
+        std::unique_lock<std::mutex> lk(g_end_mtx);
+        while (!g_transmission_done &&
+               !g_terminate.load(std::memory_order_acquire))
+        {
+            g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
+        }
+
+        if (g_transmission_done)
+        {
+            std::cout << main_debug_tag << "QRSS transmission complete." << std::endl;
+        }
+        else
+        {
+            std::cout << main_debug_tag << "Interrupted. Aborting QRSS transmission." << std::endl;
+        }
+    }
+    else if (!g_terminate.load(std::memory_order_acquire))
+    {
+        std::cout << main_debug_tag << "Press <spacebar> to end test." << std::endl;
         wait_for_space_or_signal();
-        std::cout << "Test ended." << std::endl;
+        std::cout << main_debug_tag << "Test ended." << std::endl;
     }
 
     wsprTransmitter.stop();
