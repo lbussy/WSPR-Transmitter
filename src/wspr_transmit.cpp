@@ -194,7 +194,7 @@ WsprTransmitter wsprTransmitter;
  * @brief Constructs a WSPR transmitter with default settings.
  *
  * @details Initializes the WSPR transmitter object. Transmission parameters
- * are configured later via setupTransmission(). This constructor does not
+ * are configured later via setupWSPRTransmission(). This constructor does not
  * allocate hardware resources or initiate any transmissions.
  */
 WsprTransmitter::WsprTransmitter() = default;
@@ -234,30 +234,41 @@ void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallba
     on_transmit_end_ = std::move(end_cb);
 }
 
-/**
- * @brief Configure and start a WSPR transmission.
- *
- * @details Performs the following sequence:
- *   1. Set the desired RF frequency and power level.
- *   2. Populate WSPR symbol data if transmitting a message.
- *   3. Determine WSPR mode (2‑tone or 15‑tone) and symbol timing.
- *   4. Optionally apply a random frequency offset to spread spectral load.
- *   5. Initialize DMA and mailbox resources.
- *   6. Apply the specified PPM calibration to the PLLD clock.
- *   7. Rebuild the DMA frequency table with the new PPM‑corrected clock.
- *   8. Update the actual center frequency after any hardware adjustments.
- *
- * @param[in] frequency    Target RF frequency in Hz.
- * @param[in] power        Transmit power index (0‑n).
- * @param[in] ppm          Parts‑per‑million correction to apply (e.g. +11.135).
- * @param[in] callsign     Optional callsign for WSPR message.
- * @param[in] grid_square  Optional Maidenhead grid locator.
- * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
- * @param[in] use_offset   True to apply a small random offset within band.
- *
- * @throws std::runtime_error if DMA setup or mailbox operations fail.
- */
-void WsprTransmitter::setupTransmission(
+// TODO:
+void WsprTransmitter::setupToneTransmission(
+    double frequency,
+    int power,
+    double ppm)
+{
+    if (dma_setup_done_)
+    {
+        disableTransmission();
+        dma_cleanup();
+    }
+
+    stop_requested_.store(false);
+
+    trans_params_.mode = Mode::TONE;
+    trans_params_.frequency = frequency;
+    trans_params_.ppm = ppm;
+    trans_params_.power = power;
+    trans_params_.use_offset = false;
+
+    // Initialize DMA and clocks
+    setup_dma();
+
+    dma_config_.plld_clock_frequency =
+        dma_config_.plld_nominal_freq * (1 - ppm / 1e6);
+
+    double center_actual = frequency;
+    setup_dma_freq_table(center_actual);
+
+    if (frequency != 0.0)
+        trans_params_.frequency = center_actual;
+}
+
+// TODO:
+void WsprTransmitter::setupWSPRTransmission(
     double frequency,
     int power,
     double ppm,
@@ -266,81 +277,62 @@ void WsprTransmitter::setupTransmission(
     int power_dbm,
     bool use_offset)
 {
-    // If we’ve already got DMA up, tear down the old run
+    // Tear down any existing DMA setup
     if (dma_setup_done_)
     {
-        disableTransmission(); // Stop the trandmission and scheduler
-        dma_cleanup();         // Now unmap/free everything
+        disableTransmission();
+        dma_cleanup();
     }
 
-    // Clear the stop flag so the next thread can run
     stop_requested_.store(false);
 
-    // Set transmission parameters
-    trans_params_.call_sign = call_sign;
-    trans_params_.grid_square = grid_square;
-    trans_params_.power_dbm = power_dbm;
+    // Set WSPR-specific transmission parameters
+    trans_params_.mode = Mode::WSPR;
     trans_params_.frequency = frequency;
     trans_params_.ppm = ppm;
     trans_params_.power = power;
     trans_params_.use_offset = use_offset;
 
-    // Default to TONE mode unless WSPR parameters are all valid
-    if (!trans_params_.call_sign.empty() &&
-        !trans_params_.grid_square.empty() &&
-        trans_params_.power_dbm != 0)
-    {
-        trans_params_.mode = Mode::WSPR;
-        WsprMessage msg(trans_params_.call_sign, trans_params_.grid_square, trans_params_.power_dbm);
-        trans_params_.symbols.assign(msg.symbols, msg.symbols + msg.size);
-    }
-    else
-    {
-        trans_params_.mode = Mode::TONE;
-    }
+    trans_params_.call_sign = call_sign;
+    trans_params_.grid_square = grid_square;
+    trans_params_.power_dbm = power_dbm;
 
-    // Choose WSPR mode and symbol timing
-    int offset_freq = 0;
-    // WSPR‑2 mode
     trans_params_.symtime = WSPR_SYMTIME;
-    if (trans_params_.use_offset)
-        offset_freq = WSPR_RAND_OFFSET;
     trans_params_.tone_spacing = 1.0 / trans_params_.symtime;
 
-    // Apply random offset if requested
-    if (trans_params_.use_offset)
+    // Encode WSPR message into symbols
+    WsprMessage msg(trans_params_.call_sign, trans_params_.grid_square, trans_params_.power_dbm);
+    trans_params_.symbols.assign(msg.symbols, msg.symbols + msg.size);
+
+    // Apply random frequency offset if requested
+    if (use_offset && frequency != 0.0)
     {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> dis(-1.0, 1.0);
-        // Skip offset if frequency is 0.0
-        if (trans_params_.frequency != 0.0)
-            trans_params_.frequency += dis(gen) * offset_freq;
+        frequency += dis(gen) * WSPR_RAND_OFFSET;
     }
 
-    // Initialize DMA, mapping, and control blocks
+    // Initialize DMA
     setup_dma();
 
-    // Apply PPM correction to the PLLD clock
-    // (use a stored nominal base frequency for repeatable resets)
+    // Apply PPM correction to clock
     dma_config_.plld_clock_frequency =
         dma_config_.plld_nominal_freq * (1 - ppm / 1e6);
 
-    // Build the DMA frequency lookup table with new clock
-    // Sets center_actual according to hardware limitations
-    double center_actual = trans_params_.frequency;
+    // Build DMA frequency table
+    double center_actual = frequency;
     setup_dma_freq_table(center_actual);
 
-    // Update actual frequency after any hardware adjustments
-    // Do not update if frequency = 0 (skip)
-    if (trans_params_.frequency != 0.0)
+    if (frequency != 0.0)
         trans_params_.frequency = center_actual;
 }
-
-void WsprTransmitter::setupTransmissionQRSS(
+void WsprTransmitter::setupQRSSTransmission(
     std::string_view cw_message,
     double frequency,
-    int unit_seconds)
+    int unit_seconds,
+    double ppm,
+    int power)
 {
     // Stop any active transmission
     if (dma_setup_done_)
@@ -356,19 +348,10 @@ void WsprTransmitter::setupTransmissionQRSS(
     trans_params_.frequency = frequency;
     trans_params_.qrss_unit_length = unit_seconds;
 
-    // Clear WSPR-specific fields
-    trans_params_.call_sign.clear();
-    trans_params_.grid_square.clear();
-    trans_params_.power_dbm = 0;
-
-    // Set QRSS default transmission values
-    trans_params_.ppm = 0.0;
-    trans_params_.power = 3; // Default to ~8mA
+    // Set QRSS transmission values
+    trans_params_.ppm = ppm;
+    trans_params_.power = power;
     trans_params_.use_offset = false;
-
-    // Use WSPR symbol time for DMA clock configuration
-    trans_params_.symtime = WSPR_SYMTIME;
-    trans_params_.tone_spacing = 1.0 / WSPR_SYMTIME;
 
     // DMA setup for QRSS tone generation
     setup_dma();
@@ -483,8 +466,11 @@ void WsprTransmitter::stopTransmission()
  */
 void WsprTransmitter::stop()
 {
-    disableTransmission(); // stops scheduler, signals & joins tx_thread_
-    dma_cleanup();         // unmaps peripherals, frees mailbox memory
+    if (stop_requested_.exchange(true))
+        return;
+
+    disableTransmission();
+    dma_cleanup();
 }
 
 /**
@@ -514,7 +500,7 @@ bool WsprTransmitter::isTransmitting() const noexcept
  */
 void WsprTransmitter::printParameters()
 {
-    std::cout << "Mode:              ";
+    std::cout << debug_tag << "Mode:              ";
     switch (trans_params_.mode)
     {
     case Mode::WSPR:
@@ -531,31 +517,31 @@ void WsprTransmitter::printParameters()
         break;
     }
 
-    std::cout << "Frequency:         "
+    std::cout << debug_tag << "Frequency:         "
               << std::fixed << std::setprecision(6)
               << (trans_params_.frequency / 1.0e6) << " MHz" << std::endl;
 
-    std::cout << "GPIO Power:        "
+    std::cout << debug_tag << "GPIO Power:        "
               << std::fixed << std::setprecision(1)
               << convert_mw_dbm(get_gpio_power_mw(trans_params_.power)) << " dBm" << std::endl;
 
-    std::cout << "PPM Correction:    "
+    std::cout << debug_tag << "PPM Correction:    "
               << std::fixed << std::setprecision(2)
               << trans_params_.ppm << " ppm" << std::endl;
 
-    std::cout << "DMA Table Size:    "
+    std::cout << debug_tag << "DMA Table Size:    "
               << trans_params_.dma_table_freq.size() << std::endl;
 
     if (trans_params_.mode == Mode::WSPR)
     {
-        std::cout << "Call Sign:         " << trans_params_.call_sign << std::endl;
-        std::cout << "Grid Square:       " << trans_params_.grid_square << std::endl;
-        std::cout << "Power (dBm):       " << trans_params_.power_dbm << std::endl;
-        std::cout << "Symbol Time:       " << trans_params_.symtime << " s" << std::endl;
-        std::cout << "Tone Spacing:      " << trans_params_.tone_spacing << " Hz" << std::endl;
-        std::cout << "Use Offset:        " << (trans_params_.use_offset ? "Yes" : "No") << std::endl;
+        std::cout << debug_tag << "Call Sign:         " << trans_params_.call_sign << std::endl;
+        std::cout << debug_tag << "Grid Square:       " << trans_params_.grid_square << std::endl;
+        std::cout << debug_tag << "Power (dBm):       " << trans_params_.power_dbm << std::endl;
+        std::cout << debug_tag << "Symbol Time:       " << trans_params_.symtime << " s" << std::endl;
+        std::cout << debug_tag << "Tone Spacing:      " << trans_params_.tone_spacing << " Hz" << std::endl;
+        std::cout << debug_tag << "Use Offset:        " << (trans_params_.use_offset ? "Yes" : "No") << std::endl;
 
-        std::cout << "WSPR Symbols:" << std::endl;
+        std::cout << debug_tag << "WSPR Symbols:" << std::endl;
         const int symbol_count = static_cast<int>(trans_params_.symbols.size());
         for (int i = 0; i < symbol_count; ++i)
         {
@@ -569,14 +555,14 @@ void WsprTransmitter::printParameters()
     }
     else if (trans_params_.mode == Mode::QRSS)
     {
-        std::cout << "QRSS Message:      [" << trans_params_.qrss_message << "]" << std::endl;
-        std::cout << "Dot Duration:      " << trans_params_.qrss_unit_length << "s" << std::endl;
+        std::cout << debug_tag << "QRSS Message:      [" << trans_params_.qrss_message << "]" << std::endl;
+        std::cout << debug_tag << "Dot Duration:      " << trans_params_.qrss_unit_length << "s" << std::endl;
     }
     else if (trans_params_.mode == Mode::TONE)
     {
-        std::cout << "Tone Test Mode:    True" << std::endl;
-        std::cout << "Message Fields:    N/A" << std::endl;
-        std::cout << "Symbol Fields:     N/A" << std::endl;
+        std::cout << debug_tag << "Tone Test Mode:    True" << std::endl;
+        std::cout << debug_tag << "Message Fields:    N/A" << std::endl;
+        std::cout << debug_tag << "Symbol Fields:     N/A" << std::endl;
     }
 }
 
@@ -634,7 +620,7 @@ void WsprTransmitter::transmit()
         {
             std::cerr << debug_tag << "transmit() aborted before start." << std::endl;
         }
-        fire_end_cb("Transmission aborted before start.", 0.0);
+        fire_end_cb("Transmission aborted before start", 0.0);
         return;
     }
 
@@ -653,7 +639,7 @@ void WsprTransmitter::transmit()
         break;
 
     default:
-        fire_end_cb("Unsupported mode.", 0.0);
+        fire_end_cb("Unsupported mode", 0.0);
         break;
     }
 }
@@ -681,7 +667,7 @@ void WsprTransmitter::transmit_tone()
     double total = std::chrono::duration<double>(t1 - t0).count();
     total = std::round(total * 1000.0) / 1000.0;
 
-    fire_end_cb("Tone transmission ended.", total);
+    fire_end_cb("Tone transmission ended", total);
 }
 
 // TODO:
@@ -689,7 +675,7 @@ void WsprTransmitter::transmit_wspr()
 {
     if (trans_params_.frequency == 0.0)
     {
-        fire_end_cb("Skipping transmission (frequency = 0.0).", 0.0);
+        fire_end_cb("Skipping WSPR transmission (frequency = 0.0)", 0.0);
         return;
     }
 
@@ -702,10 +688,17 @@ void WsprTransmitter::transmit_wspr()
     const int symbol_count = static_cast<int>(trans_params_.symbols.size());
     const double symtime = trans_params_.symtime;
     int bufPtr = 0;
+    bool interrupted = false;
 
     transmit_on();
-    for (int i = 0; i < symbol_count && !stop_requested_.load(); ++i)
+    for (int i = 0; i < symbol_count; ++i)
     {
+        if (stop_requested_.load())
+        {
+            interrupted = true;
+            break;
+        }
+
         long offset_ns = static_cast<long>(i * symtime * 1e9);
         struct timespec target = t0_ts;
         target.tv_sec += offset_ns / 1000000000;
@@ -729,56 +722,51 @@ void WsprTransmitter::transmit_wspr()
     double total = std::chrono::duration<double>(t1 - t0_chrono).count();
     total = std::round(total * 1000.0) / 1000.0;
 
-    fire_end_cb("WSPR transmission complete.", total);
+    if (interrupted)
+        fire_end_cb("WSPR transmission interrupted", total);
+    else
+        fire_end_cb("WSPR transmission complete", total);
 }
 
-// TODO: Implement transmit_qrss()
+// TODO
 void WsprTransmitter::transmit_qrss()
 {
-    if (stop_requested_.load())
+    if (trans_params_.frequency == 0.0)
+    {
+        fire_end_cb("Skipping QRSS transmission (frequency = 0.0)", 0.0);
         return;
-
-    // Capture precise start anchor
-    auto t0 = std::chrono::steady_clock::now();
+    }
 
     fire_start_cb("QRSS Message", trans_params_.frequency);
     transmit_on();
 
+    auto t0 = std::chrono::steady_clock::now();
     int symbol_index = 0;
+    bool interrupted = false;
 
     for (char c : trans_params_.qrss_message)
     {
         if (stop_requested_.load())
+        {
+            interrupted = true;
             break;
+        }
 
         int units = 0;
         bool tone_on = false;
 
         switch (c)
         {
-        case '.':
-            units = 1;
-            tone_on = true;
-            break;
-        case '-':
-            units = 3;
-            tone_on = true;
-            break;
-        case ' ':
-            units = 1;
-            tone_on = false;
-            break;
-        default:
-            continue;
+        case '.': units = 1; tone_on = true; break;
+        case '-': units = 3; tone_on = true; break;
+        case ' ': units = 1; tone_on = false; break;
+        default: continue;
         }
 
-        // Compute absolute start time for this symbol
-        auto symbol_start = t0 + std::chrono::seconds(symbol_index * qrss_unit_length_);
-        auto symbol_end = symbol_start + std::chrono::seconds(units * qrss_unit_length_);
+        auto symbol_start = t0 + std::chrono::seconds(symbol_index * trans_params_.qrss_unit_length);
+        auto symbol_end = symbol_start + std::chrono::seconds(units * trans_params_.qrss_unit_length);
 
-        // Sleep until this symbol's start
         sleep_until_abs(symbol_start);
-
         auto actual_start = std::chrono::steady_clock::now();
 
         if (tone_on)
@@ -786,9 +774,7 @@ void WsprTransmitter::transmit_qrss()
         else
             transmit_off();
 
-        // Sleep until the expected end of the symbol
         sleep_until_abs(symbol_end);
-
         auto actual_end = std::chrono::steady_clock::now();
 
         if (symbol_cb_)
@@ -804,9 +790,12 @@ void WsprTransmitter::transmit_qrss()
 
     auto t1 = std::chrono::steady_clock::now();
     double total = std::chrono::duration<double>(t1 - t0).count();
-    total = std::round(total * 10000.0) / 10000.0; // Rounds to 4 decimal places
+    total = std::round(total * 10000.0) / 10000.0;
 
-    fire_end_cb("QRSS transmission complete", total);
+    if (interrupted)
+        fire_end_cb("QRSS transmission interrupted", total);
+    else
+        fire_end_cb("QRSS transmission complete", total);
 }
 
 /**

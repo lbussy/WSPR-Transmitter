@@ -99,7 +99,8 @@ public:
         WSPR,
         QRSS,
         FSKCW,
-        DFCW
+        DFCW,
+        UNKNOWN
     };
 
     /**
@@ -129,43 +130,29 @@ public:
     void setTransmissionCallbacks(StartCallback start_cb = {},
                                   EndCallback end_cb = {});
 
-    /**
-     * @brief Configure and start a WSPR transmission.
-     *
-     * @details Performs the following sequence:
-     *   1. Set the desired RF frequency and power level.
-     *   2. Populate WSPR symbol data if transmitting a message.
-     *   3. Determine WSPR mode (2‑tone or 15‑tone) and symbol timing.
-     *   4. Optionally apply a random frequency offset to spread spectral load.
-     *   5. Initialize DMA and mailbox resources.
-     *   6. Apply the specified PPM calibration to the PLLD clock.
-     *   7. Rebuild the DMA frequency table with the new PPM‑corrected clock.
-     *   8. Update the actual center frequency after any hardware adjustments.
-     *
-     * @param[in] frequency    Target RF frequency in Hz.
-     * @param[in] power        Transmit power index (0‑n).
-     * @param[in] ppm          Parts‑per‑million correction to apply (e.g. +11.135).
-     * @param[in] callsign     Optional callsign for WSPR message.
-     * @param[in] grid_square  Optional Maidenhead grid locator.
-     * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
-     * @param[in] use_offset   True to apply a small random offset within band.
-     *
-     * @throws std::runtime_error if DMA setup or mailbox operations fail.
-     */
-    void setupTransmission(
+    // TODO:
+    void setupToneTransmission(
+        double frequency,
+        int power,
+        double ppm);
+
+    // TODO:
+    void setupWSPRTransmission(
         double frequency,
         int power,
         double ppm,
-        std::string_view call_sign = {},
-        std::string_view grid_square = {},
-        int power_dbm = 0,
-        bool use_offset = false);
+        std::string_view call_sign,
+        std::string_view grid_square,
+        int power_dbm,
+        bool use_offset);
 
-    // Setup method for QRSS
-    void setupTransmissionQRSS(
+    // TODO:
+    void setupQRSSTransmission(
         std::string_view cw_message,
         double frequency,
-        int unit_seconds);
+        int unit_seconds,
+        double ppm,
+        int power);
 
     /**
      * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
