@@ -115,11 +115,11 @@ void wait_for_space_or_signal()
 WsprTransmitter::Mode select_mode()
 {
     TermiosGuard tg;
-    std::cout << "Select mode:\n"
-              << "  1) WSPR\n"
-              << "  2) QRSS\n"
-              << "  3) TONE\n"
-              << "Enter [1/2/3]: " << std::endl << std::flush;
+    std::cout << "Select mode:" << std::endl;
+    std::cout << "\t1) WSPR" << std::endl;
+    std::cout << "\t2) QRSS" << std::endl;
+    std::cout << "\t3) TONE" << std::endl;
+    std::cout << "Enter [1/2/3]: " << std::endl << std::flush;
 
     fd_set rfds;
     while (!g_terminate.load())
@@ -163,7 +163,7 @@ WsprTransmitter::Mode select_mode()
 
 void sig_handler(int)
 {
-    const char msg[] = "\n[Signal Handler  ] Caught signal\nShutting down transmissions.\n";
+    const char msg[] = "[Signal Handler  ] Caught signal\n[Signal Handler  ] Shutting down transmissions.\n";
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
     wsprTransmitter.stop();
     g_terminate.store(true);
