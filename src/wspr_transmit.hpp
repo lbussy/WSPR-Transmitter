@@ -118,6 +118,31 @@ public:
     using EndCallback = std::function<void(const std::string & /*msg*/, double /*elapsed_secs*/)>;
 
     /**
+     * @brief Converts a Mode enum value to its string representation.
+     *
+     * @details This function maps each WsprTransmitter::Mode enum value
+     *          to its corresponding uppercase string, such as "TONE", "WSPR",
+     *          "QRSS", etc.
+     *
+     * @param mode The Mode enum value to convert.
+     * @return A std::string representing the name of the mode.
+     */
+    std::string modeToString(Mode mode);
+
+    /**
+     * @brief Converts a string name to a Mode enum value.
+     *
+     * @details This function performs a case-insensitive comparison of the input
+     *          string against known mode names ("TONE", "WSPR", "QRSS", etc.)
+     *          and returns the corresponding Mode enum value. If the name does
+     *          not match any known mode, Mode::UNKNOWN is returned.
+     *
+     * @param name The input string representing the mode name.
+     * @return The corresponding Mode enum value.
+     */
+    Mode stringToMode(const std::string &name);
+
+    /**
      * @brief Install optional callbacks for transmission start/end.
      *
      * @param[in] start_cb
@@ -131,13 +156,38 @@ public:
     void setTransmissionCallbacks(StartCallback start_cb = {},
                                   EndCallback end_cb = {});
 
-    // TODO:
+    /**
+     * @brief Sets up a continuous tone transmission.
+     *
+     * @details Configures the transmitter to emit a continuous unmodulated carrier
+     *          at the specified frequency. Typically used for audio testing,
+     *          signal tracing, or tone-based modes. PPM correction is applied to
+     *          improve frequency accuracy.
+     *
+     * @param frequency The output frequency in Hz.
+     * @param ppm The frequency correction in parts per million.
+     * @param power The GPIO pin used to enable/disable RF output power.
+     */
     void setupToneTransmission(
         double frequency,
-        int power,
-        double ppm);
+        double ppm,
+        int power);
 
-    // TODO:
+    /**
+     * @brief Sets up a WSPR (Weak Signal Propagation Reporter) transmission.
+     *
+     * @details Prepares a WSPR message using the provided call sign, grid square,
+     *          and power level. Encodes the message, applies optional sub-tone
+     *          frequency offset, and sets the corrected transmission frequency.
+     *
+     * @param frequency The base transmission frequency in Hz.
+     * @param power The GPIO pin used to control RF output power.
+     * @param ppm Frequency correction in parts per million.
+     * @param call_sign The station call sign (maximum 6 characters).
+     * @param grid_square The 4-character or 6-character Maidenhead grid locator.
+     * @param power_dbm Transmit power level to encode in the WSPR message (in dBm).
+     * @param use_offset Whether to use the +1.46 Hz tone offset.
+     */
     void setupWSPRTransmission(
         double frequency,
         int power,
@@ -147,7 +197,19 @@ public:
         int power_dbm,
         bool use_offset);
 
-    // TODO:
+    /**
+     * @brief Sets up a QRSS (very slow CW) transmission.
+     *
+     * @details Converts the provided CW message to a series of tones
+     *          spaced in time using standard Morse code timing. Transmission
+     *          uses a fixed dot length (in seconds) and applies PPM correction.
+     *
+     * @param cw_message The CW message to transmit.
+     * @param frequency The output frequency in Hz.
+     * @param unit_seconds The dot length in seconds (QRSS speed).
+     * @param ppm Frequency correction in parts per million.
+     * @param power The GPIO pin used to control RF output power.
+     */
     void setupQRSSTransmission(
         std::string_view cw_message,
         double frequency,
@@ -272,12 +334,30 @@ public:
      */
     void printParameters();
 
-    // TODO: Symbol timing callback
-    void setSymbolCallback(std::function<void(char, std::chrono::nanoseconds)> cb);
+    /**
+     * @brief Sets the callback for symbol transmission.
+     *
+     * @details The callback will be called for each symbol with the symbol
+     * character, its duration, and the current tone string associated with the
+     * transmission (e.g., Morse character context).
+     *
+     * @param cb A function taking (char symbol, duration, Mode tone)
+     */
+    void setSymbolCallback(std::function<void(char, std::chrono::nanoseconds, Mode)> cb);
 
 private:
-    // TODO: Symbol timing callback
-    std::function<void(char, std::chrono::nanoseconds)> symbol_cb_;
+    /**
+     * @brief Callback for transmitting individual symbols.
+     *
+     * @details This callback is invoked for each symbol during transmission,
+     * providing the symbol character, its duration, and the current transmission
+     * mode. It can be used for logging, diagnostics, or UI feedback.
+     *
+     * @param char The symbol being transmitted (e.g., Morse code dot/dash).
+     * @param std::chrono::nanoseconds The duration the symbol is transmitted.
+     * @param Mode The transmission mode in effect (e.g., TONE, WSPR, QRSS).
+     */
+    std::function<void(char, std::chrono::nanoseconds, Mode)> symbol_cb_;
 
     /**
      * @brief Invoked just before each transmission begins.
@@ -593,6 +673,42 @@ private:
     std::vector<uint32_t> dma_table_freq_;         ///< Active DMA frequency table (used by transmit_symbol)
 
     /**
+     * @brief Represents a DMA-compatible memory page of packed clock divisors
+     *
+     * This wrapper allows flexibility in handling prebuilt DMA tables for
+     * FSKCW, DFCW, or future modes where each symbol may have a unique
+     * timing or shape.
+     */
+    struct DmaPage
+    {
+        std::vector<uint32_t> data;
+    };
+
+    /**
+     * @brief DMA page data for mark (base) frequency.
+     *
+     * @details This vector holds the precomputed DMA pages used to transmit the mark
+     *          (unshifted) frequency in CW-based transmission modes such as QRSS,
+     *          FSKCW, and DFCW. It contains the raw 32-bit instructions used by the
+     *          DMA controller to generate the output waveform.
+     *
+     * Populated by `create_dma_pages()` based on the desired base frequency.
+     */
+    std::vector<DmaPage> dma_pages_mark_;
+
+    /**
+     * @brief DMA page data for space (shifted) frequency.
+     *
+     * @details This vector holds the precomputed DMA pages used to transmit the space
+     *          (frequency-shifted) tone in transmission modes that require it, such as
+     *          FSKCW and DFCW. It is only initialized when an alternate frequency is
+     *          requested via `setupCWTransmission()`.
+     *
+     * If not used, this vector is cleared to prevent unintended access.
+     */
+    std::vector<DmaPage> dma_pages_space_;
+
+    /**
      * @brief DMA configuration and saved state for transmission setup/cleanup.
      *
      * @details Stores both the nominal and (PPM‑corrected) PLLD clock frequencies,
@@ -772,27 +888,75 @@ private:
     void fire_end_cb(const std::string &msg, double elapsed);
 
     /**
-     * @brief Perform DMA-driven RF transmission.
+     * @brief Starts RF transmission based on the current transmission mode.
      *
-     * @details
-     *   1. Records the start time as a reference for symbol scheduling.
-     *   2. Enables the PWM clock and DMA engine for transmission.
-     *   3. If in tone mode, continuously transmits a fixed‑frequency test tone.
-     *   4. Otherwise, transmits each WSPR symbol in sequence, using gettimeofday()
-     *      and `timeval_subtract()` to schedule precise symbol timing.
-     *   5. Disables transmission when complete.
+     * @details This function checks for early termination requests and then
+     *          dispatches the transmission to the appropriate method based on
+     *          the configured mode in `trans_params_`. Supported modes include
+     *          WSPR, QRSS, FSKCW, DFCW, and continuous tone. If the mode is
+     *          unknown or unsupported, an end callback is fired with an error
+     *          message.
      *
-     * @note In tone mode (`trans_params_.mode == Mode::TONE == true`), this function only
-     *       returns via SIGINT.
+     * @note If `stop_requested_` is already set, the transmission is aborted
+     *       and a corresponding callback is issued without starting any RF output.
      */
     void transmit();
 
     // TODO:
     std::pair<int, bool> morse_char_to_units(char c);
     void transmit_tone();
+
+    /**
+     * @brief Perform a full WSPR transmission sequence.
+     *
+     * @details This function transmits a WSPR message using the symbol data previously
+     *          encoded into `trans_params_.symbols` and the transmission parameters
+     *          (frequency, symbol duration, etc.).
+     *
+     * Each symbol is transmitted at precise intervals derived from the system
+     * monotonic clock to maintain strict timing. The routine supports early termination
+     * via `stop_requested_` and uses precomputed DMA buffers for each symbol.
+     *
+     * @throws None
+     */
     void transmit_wspr();
+
+    /**
+     * @brief Transmit a QRSS (very slow Morse code) message.
+     *
+     * @details Transmits a pre-encoded Morse code string defined in
+     *          `trans_params_.qrss_message`, using a single frequency for tone
+     *          symbols ('.' and '-') and timed silence for gaps. Each unit is
+     *          scaled by `trans_params_.qrss_unit_length` seconds.
+     *
+     * The function uses absolute sleep scheduling to ensure consistent spacing
+     * between symbols. It also invokes the symbol callback after each symbol or
+     * space is emitted, if registered.
+     *
+     * @throws None
+     */
     void transmit_qrss();
     void transmit_fskcw();
+    void transmit_dfcw();
+
+    /**
+     * @brief Transmit an FSKCW (Frequency Shift Keyed Continuous Wave) message.
+     *
+     * @details FSKCW is a Morse-like mode that uses frequency shifts to
+     *          distinguish between signal elements and spacing. The tone is
+     *          always present — either at the mark (base) or space (offset)
+     *          frequency. Symbols (e.g., '.' and '-') use the base frequency,
+     *          while spaces use the offset frequency.
+     *
+     * Timing is derived from `trans_params_.qrss_unit_length`, with durations
+     * based on the number of units associated with each character in the
+     * `qrss_message`. Frequencies are precomputed into DMA pages.
+     *
+     * @throws None
+     */
+    void transmit_fskcw();
+
+    // TODO:
     void transmit_dfcw();
 
     /**
@@ -994,6 +1158,25 @@ private:
     double bit_trunc(const double &d, const int &lsb);
 
     /**
+     * @brief Create a vector of DMA pages for a specific frequency.
+     *
+     * @details This function generates the packed frequency divisor table
+     *          using `create_dma_freq_table()` for the given frequency,
+     *          wraps it in a `DmaPage` struct, and returns it inside a vector.
+     *          This structure is used to represent DMA-friendly waveform data
+     *          for a specific output frequency.
+     *
+     * @param freq The desired output frequency in Hz.
+     *
+     * @return A vector of `DmaPage` structures, each containing the DMA waveform
+     *         data for the specified frequency.
+     */
+    void create_dma_pages(
+        struct PageInfo &const_page_,
+        struct PageInfo &instr_page_,
+        struct PageInfo instructions_[]);
+
+    /**
      * @brief Configures and initializes DMA for PWM signal generation.
      * @details Allocates memory pages, creates DMA control blocks, sets up a
      *          circular inked list of DMA instructions, and configures the
@@ -1004,10 +1187,7 @@ private:
      *                       page.
      * @param[out] instructions_ Array of PageInfo structures for DMA instructions.
      */
-    void create_dma_pages(
-        struct PageInfo &const_page_,
-        struct PageInfo &instr_page_,
-        struct PageInfo instructions_[]);
+    std::vector<WsprTransmitter::DmaPage> create_dma_pages(double freq);
 
     /**
      * @brief Configure and initialize the DMA system for WSPR transmission.
@@ -1045,6 +1225,48 @@ private:
         double ppm);
 
     // TODO:
+    std::vector<uint32_t> create_dma_freq_table(double freq);
+
+    /**
+     * @brief Prepares DMA pages for CW-based transmission modes.
+     *
+     * @details This method configures the DMA frequency tables for CW (continuous wave)
+     *          modes such as QRSS, FSKCW, and DFCW. It applies PPM correction to the
+     *          PLLD base clock, generates DMA pages for both mark and (optionally)
+     *          space frequencies.
+     *
+     * If `alt_freq` is not provided, only a single frequency (mark tone) is used.
+     * If `alt_freq` is provided (used in FSKCW and DFCW), both mark and space DMA
+     * pages are generated.
+     *
+     * @param base_freq The base (mark) frequency in Hz.
+     * @param alt_freq Optional space frequency in Hz, used in frequency-shift modes.
+     * @param ppm Frequency correction in parts per million (applied to PLLD clock).
+     */
+    void setupCWTransmission(
+        double base_freq,
+        std::optional<double> alt_freq,
+        double ppm);
+
+    /**
+     * @brief Create a DMA-compatible frequency divisor table for a specific frequency.
+     *
+     * @details Calculates the integer (`divi`) and fractional (`divf`) clock divisors
+     *          needed to produce the desired frequency from the PLLD clock source.
+     *          Each entry in the returned table is a packed 32-bit value combining
+     *          the integer and fractional parts. The table length is based on
+     *          `dma_config_.freq_table_length` and is filled with identical values
+     *          for the requested frequency.
+     *
+     *          The packed divisor format is:
+     *          ```
+     *          packed_div = (divi << 12) | (divf & 0xFFF)
+     *          ```
+     *
+     * @param freq The target frequency in Hz to encode into the DMA divisor table.
+     *
+     * @return A vector of 32-bit packed clock divisor values suitable for DMA use.
+     */
     std::vector<uint32_t> create_dma_freq_table(double freq);
 
     /**

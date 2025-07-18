@@ -180,6 +180,67 @@ namespace
 } // end anonymous namespace
 
 /**
+ * @brief Converts a Mode enum value to its string representation.
+ *
+ * @details This function maps each WsprTransmitter::Mode enum value
+ *          to its corresponding uppercase string, such as "TONE", "WSPR",
+ *          "QRSS", etc.
+ *
+ * @param mode The Mode enum value to convert.
+ * @return A std::string representing the name of the mode.
+ */
+std::string WsprTransmitter::modeToString(Mode mode)
+{
+    switch (mode)
+    {
+    case Mode::TONE:
+        return "TONE";
+    case Mode::WSPR:
+        return "WSPR";
+    case Mode::QRSS:
+        return "QRSS";
+    case Mode::FSKCW:
+        return "FSKCW";
+    case Mode::DFCW:
+        return "DFCW";
+    case Mode::UNKNOWN:
+    default:
+        return "UNKNOWN";
+    }
+}
+
+/**
+ * @brief Converts a string name to a Mode enum value.
+ *
+ * @details This function performs a case-insensitive comparison of the input
+ *          string against known mode names ("TONE", "WSPR", "QRSS", etc.)
+ *          and returns the corresponding Mode enum value. If the name does
+ *          not match any known mode, Mode::UNKNOWN is returned.
+ *
+ * @param name The input string representing the mode name.
+ * @return The corresponding Mode enum value.
+ */
+WsprTransmitter::Mode WsprTransmitter::stringToMode(const std::string &name)
+{
+    std::string upper;
+    std::transform(name.begin(), name.end(), std::back_inserter(upper),
+                   [](unsigned char c)
+                   { return std::toupper(c); });
+
+    if (upper == "TONE")
+        return Mode::TONE;
+    if (upper == "WSPR")
+        return Mode::WSPR;
+    if (upper == "QRSS")
+        return Mode::QRSS;
+    if (upper == "FSKCW")
+        return Mode::FSKCW;
+    if (upper == "DFCW")
+        return Mode::DFCW;
+    return Mode::UNKNOWN;
+}
+
+/**
  * @brief Global instance of the WSPR transmitter.
  *
  * @details This instance provides a globally accessible transmitter object
@@ -234,38 +295,59 @@ void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallba
     on_transmit_end_ = std::move(end_cb);
 }
 
-// TODO:
+/**
+ * @brief Sets up a continuous tone transmission.
+ *
+ * @details Configures the transmitter to emit a continuous unmodulated carrier
+ *          at the specified frequency. Typically used for audio testing,
+ *          signal tracing, or tone-based modes. PPM correction is applied to
+ *          improve frequency accuracy.
+ *
+ * @param frequency The output frequency in Hz.
+ * @param ppm The frequency correction in parts per million.
+ * @param power The GPIO pin used to enable/disable RF output power.
+ */
 void WsprTransmitter::setupToneTransmission(
     double frequency,
-    int power,
-    double ppm)
+    double ppm,
+    int power)
 {
-    if (dma_setup_done_)
-    {
-        disableTransmission();
-        dma_cleanup();
-    }
-
-    stop_requested_.store(false);
-
+    // Set transmission parameters
     trans_params_.mode = Mode::TONE;
     trans_params_.frequency = frequency;
-    trans_params_.ppm = ppm;
     trans_params_.power = power;
-    trans_params_.use_offset = false;
 
-    // Initialize DMA and clocks
-    setup_dma();
+    if (debug)
+    {
+        std::cerr << debug_tag
+                  << " TONE setup: freq = " << frequency
+                  << " Hz, power = " << power
+                  << std::endl;
+    }
 
     // Reuse shared CW setup for single-tone mode
     setupCWTransmission(frequency, std::nullopt, ppm);
 
-    // Optional: update actual center freq if you recompute or adjust it
+    // TODO? Update actual center freq if you recompute or adjust it
     if (frequency != 0.0)
         trans_params_.frequency = frequency;
 }
 
-// TODO:
+/**
+ * @brief Sets up a WSPR (Weak Signal Propagation Reporter) transmission.
+ *
+ * @details Prepares a WSPR message using the provided call sign, grid square,
+ *          and power level. Encodes the message, applies optional sub-tone
+ *          frequency offset, and sets the corrected transmission frequency.
+ *
+ * @param frequency The base transmission frequency in Hz.
+ * @param power The GPIO pin used to control RF output power.
+ * @param ppm Frequency correction in parts per million.
+ * @param call_sign The station call sign (maximum 6 characters).
+ * @param grid_square The 4-character or 6-character Maidenhead grid locator.
+ * @param power_dbm Transmit power level to encode in the WSPR message (in dBm).
+ * @param use_offset Whether to use the +1.46 Hz tone offset.
+ */
 void WsprTransmitter::setupWSPRTransmission(
     double frequency,
     int power,
@@ -326,7 +408,19 @@ void WsprTransmitter::setupWSPRTransmission(
         trans_params_.frequency = center_actual;
 }
 
-// TODO:
+/**
+ * @brief Sets up a QRSS (very slow CW) transmission.
+ *
+ * @details Converts the provided CW message to a series of tones
+ *          spaced in time using standard Morse code timing. Transmission
+ *          uses a fixed dot length (in seconds) and applies PPM correction.
+ *
+ * @param cw_message The CW message to transmit.
+ * @param frequency The output frequency in Hz.
+ * @param unit_seconds The dot length in seconds (QRSS speed).
+ * @param ppm Frequency correction in parts per million.
+ * @param power The GPIO pin used to control RF output power.
+ */
 void WsprTransmitter::setupQRSSTransmission(
     std::string_view cw_message,
     double frequency,
@@ -334,24 +428,12 @@ void WsprTransmitter::setupQRSSTransmission(
     double ppm,
     int power)
 {
-    // Stop any active transmission
-    if (dma_setup_done_)
-    {
-        disableTransmission();
-        dma_cleanup();
-    }
-    stop_requested_.store(false);
-
-    // Set transmission mode and message
+    // Set transmission parameters
     trans_params_.mode = Mode::QRSS;
-    trans_params_.qrss_message = std::string(cw_message);
     trans_params_.frequency = frequency;
     trans_params_.qrss_unit_length = unit_seconds;
-
-    // Set QRSS transmission values
-    trans_params_.ppm = ppm;
+    trans_params_.qrss_message = std::string(cw_message);
     trans_params_.power = power;
-    trans_params_.use_offset = false;
 
     // DMA setup
     setup_dma();
@@ -641,7 +723,17 @@ void WsprTransmitter::printParameters()
     }
 }
 
-void WsprTransmitter::setSymbolCallback(std::function<void(char, std::chrono::nanoseconds)> cb)
+/**
+ * @brief Sets the callback for symbol transmission.
+ *
+ * @details The callback will be called for each symbol with the symbol
+ * character, its duration, and the current tone string associated with the
+ * transmission (e.g., Morse character context).
+ *
+ * @param cb A function taking (char symbol, duration, Mode)
+ */
+void WsprTransmitter::setSymbolCallback(
+    std::function<void(char, std::chrono::nanoseconds, Mode)> cb)
 {
     symbol_cb_ = std::move(cb);
 }
@@ -686,19 +778,36 @@ inline void WsprTransmitter::fire_end_cb(const std::string &msg, double elapsed)
     }
 }
 
-// TODO:
+/**
+ * @brief Starts RF transmission based on the current transmission mode.
+ *
+ * @details This function checks for early termination requests and then
+ *          dispatches the transmission to the appropriate method based on
+ *          the configured mode in `trans_params_`. Supported modes include
+ *          WSPR, QRSS, FSKCW, DFCW, and continuous tone. If the mode is
+ *          unknown or unsupported, an end callback is fired with an error
+ *          message.
+ *
+ * @note If `stop_requested_` is already set, the transmission is aborted
+ *       and a corresponding callback is issued without starting any RF output.
+ */
 void WsprTransmitter::transmit()
 {
+    // Abort early if a stop was requested before entering transmission
     if (stop_requested_.load())
     {
         if (debug)
         {
-            std::cerr << debug_tag << "transmit() aborted before start." << std::endl;
+            std::cerr << debug_tag
+                      << "transmit() aborted before start."
+                      << std::endl;
         }
+
         fire_end_cb("Transmission aborted before start", 0.0);
         return;
     }
 
+    // Dispatch to appropriate transmission mode
     switch (trans_params_.mode)
     {
     case Mode::WSPR:
@@ -727,7 +836,20 @@ void WsprTransmitter::transmit()
     }
 }
 
-// TODO:
+/**
+ * @brief Begins continuous tone transmission using the precomputed mark frequency.
+ *
+ * @details This method initiates a tone transmission loop that continuously outputs
+ *          a carrier at the base (mark) frequency until a stop request is issued.
+ *
+ * The tone uses the DMA instruction set precomputed in `dma_pages_mark_`, typically
+ * created during `setupCWTransmission()` or `setupToneTransmission()`.
+ *
+ * This method blocks until `stop_requested_` is set. It is intended for test
+ * transmission or carrier-only modes like TONE.
+ *
+ * @throws None
+ */
 void WsprTransmitter::transmit_tone()
 {
     fire_start_cb("Continuous tone", trans_params_.frequency);
@@ -757,9 +879,22 @@ void WsprTransmitter::transmit_tone()
     fire_end_cb("Tone transmission ended", total);
 }
 
-// TODO:
+/**
+ * @brief Perform a full WSPR transmission sequence.
+ *
+ * @details This function transmits a WSPR message using the symbol data previously
+ *          encoded into `trans_params_.symbols` and the transmission parameters
+ *          (frequency, symbol duration, etc.).
+ *
+ * Each symbol is transmitted at precise intervals derived from the system
+ * monotonic clock to maintain strict timing. The routine supports early termination
+ * via `stop_requested_` and uses precomputed DMA buffers for each symbol.
+ *
+ * @throws None
+ */
 void WsprTransmitter::transmit_wspr()
 {
+    // Validate configuration
     if (trans_params_.frequency == 0.0)
     {
         fire_end_cb("Skipping WSPR transmission (frequency = 0.0)", 0.0);
@@ -768,6 +903,7 @@ void WsprTransmitter::transmit_wspr()
 
     fire_start_cb("WSPR", trans_params_.frequency);
 
+    // Capture start time using chrono and raw timespec
     auto t0_chrono = std::chrono::steady_clock::now();
     struct timespec t0_ts;
     clock_gettime(CLOCK_MONOTONIC, &t0_ts);
@@ -777,7 +913,10 @@ void WsprTransmitter::transmit_wspr()
     int bufPtr = 0;
     bool interrupted = false;
 
+    // Begin RF transmission
     transmit_on();
+
+    // Transmit each symbol with precise timing
     for (int i = 0; i < symbol_count; ++i)
     {
         if (stop_requested_.load())
@@ -786,6 +925,7 @@ void WsprTransmitter::transmit_wspr()
             break;
         }
 
+        // Calculate the target time for this symbol
         long offset_ns = static_cast<long>(i * symtime * 1e9);
         struct timespec target = t0_ts;
         target.tv_sec += offset_ns / 1000000000;
@@ -796,19 +936,25 @@ void WsprTransmitter::transmit_wspr()
             target.tv_nsec -= 1000000000;
         }
 
+        // Sleep until the symbol's scheduled time
         sleep_until_abs(target);
 
+        // Transmit this symbol using DMA
         transmit_symbol(
             static_cast<int>(trans_params_.symbols[i]),
             symtime,
             bufPtr);
     }
+
+    // Stop RF output
     transmit_off();
 
+    // Compute total transmission time
     auto t1 = std::chrono::steady_clock::now();
     double total = std::chrono::duration<double>(t1 - t0_chrono).count();
     total = std::round(total * 1000.0) / 1000.0;
 
+    // Report completion or interruption
     if (interrupted)
         fire_end_cb("WSPR transmission interrupted", total);
     else
@@ -834,6 +980,7 @@ std::pair<int, bool> WsprTransmitter::morse_char_to_units(char c)
 // TODO
 void WsprTransmitter::transmit_qrss()
 {
+    // Validate frequency
     if (trans_params_.frequency == 0.0)
     {
         fire_end_cb("Skipping QRSS transmission (frequency = 0.0)", 0.0);
@@ -934,8 +1081,10 @@ void WsprTransmitter::transmit_fskcw()
     int symbol_index = 0;
     bool interrupted = false;
 
+    // Iterate through Morse code message
     for (char c : trans_params_.qrss_message)
     {
+        // Check for early termination
         if (stop_requested_.load())
         {
             interrupted = true;
@@ -987,6 +1136,7 @@ void WsprTransmitter::transmit_fskcw()
 
         auto actual_end = std::chrono::steady_clock::now();
 
+        // Invoke symbol callback if registered
         if (symbol_cb_)
         {
             auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -994,6 +1144,7 @@ void WsprTransmitter::transmit_fskcw()
             symbol_cb_(c, duration);
         }
 
+        // Advance index for timing future symbols
         symbol_index += units;
     }
 
@@ -1012,6 +1163,155 @@ void WsprTransmitter::transmit_fskcw()
 void WsprTransmitter::transmit_dfcw()
 {
     return;
+}
+
+/**
+ * @brief Transmit an FSKCW (Frequency Shift Keyed Continuous Wave) message.
+ *
+ * @details FSKCW is a Morse-like mode that uses frequency shifts to
+ *          distinguish between signal elements and spacing. The tone is
+ *          always present — either at the mark (base) or space (offset)
+ *          frequency. Symbols (e.g., '.' and '-') use the base frequency,
+ *          while spaces use the offset frequency.
+ *
+ * Timing is derived from `trans_params_.qrss_unit_length`, with durations
+ * based on the number of units associated with each character in the
+ * `qrss_message`. Frequencies are precomputed into DMA pages.
+ *
+ * @throws None
+ */
+void WsprTransmitter::transmit_fskcw()
+{
+    // Validate frequency
+    if (trans_params_.frequency == 0.0)
+    {
+        fire_end_cb("Skipping FSKCW transmission (frequency = 0.0)", 0.0);
+        return;
+    }
+
+    fire_start_cb("FSKCW Message", trans_params_.frequency);
+    transmit_on();
+
+    auto t0 = std::chrono::steady_clock::now();
+    int symbol_index = 0;
+    bool interrupted = false;
+
+    // Iterate through Morse message
+    for (char c : trans_params_.qrss_message)
+    {
+        // Early stop check
+        if (stop_requested_.load())
+        {
+            interrupted = true;
+            break;
+        }
+
+        // Determine how many units and whether it's a symbol or space
+        auto [units, is_symbol] = morse_char_to_units(c);
+        if (units == 0)
+            continue;
+
+        std::chrono::steady_clock::time_point symbol_start;
+        std::chrono::steady_clock::time_point actual_start;
+
+        // Calculate absolute time to emit symbol
+        if (symbol_index == 0)
+        {
+            symbol_start = std::chrono::steady_clock::now();
+            actual_start = symbol_start;
+        }
+        else
+        {
+            symbol_start = t0 + std::chrono::seconds(symbol_index * trans_params_.qrss_unit_length);
+            sleep_until_abs(symbol_start);
+            actual_start = std::chrono::steady_clock::now();
+        }
+
+        // Choose DMA page: base frequency for symbol, offset for space
+        const auto &page = is_symbol ? dma_pages_mark_[0] : dma_pages_space_[0];
+        std::memcpy(const_page_.v, page.data.data(), page.data.size() * sizeof(uint32_t));
+
+        if (debug)
+        {
+            double base_freq = trans_params_.frequency;
+            double shifted_freq = trans_params_.frequency - trans_params_.offset;
+
+            std::cerr << debug_tag
+                      << " Symbol '" << c << "' using freq "
+                      << (is_symbol ? base_freq : shifted_freq)
+                      << " Hz → DMA[0] = " << page.data[0]
+                      << ", DMA[1] = " << page.data[1]
+                      << std::endl;
+        }
+
+        // Transmit tone for the duration of the symbol or space
+        double duration_s = static_cast<double>(units * trans_params_.qrss_unit_length);
+        int dummy_buf = 0;
+        transmit_symbol(0, duration_s, dummy_buf);
+
+        auto actual_end = std::chrono::steady_clock::now();
+
+        // Call symbol callback if defined
+        if (symbol_cb_)
+        {
+            auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                actual_end - actual_start);
+            symbol_cb_(c, duration, trans_params_.mode);
+        }
+
+        // Advance timing offset
+        symbol_index += units;
+    }
+
+    transmit_off();
+
+    auto t1 = std::chrono::steady_clock::now();
+    double total = std::chrono::duration<double>(t1 - t0).count();
+    total = std::round(total * 10000.0) / 10000.0;
+
+    if (interrupted)
+        fire_end_cb("FSKCW transmission interrupted", total);
+    else
+        fire_end_cb("FSKCW transmission complete", total);
+}
+
+// TODO:
+void WsprTransmitter::transmit_dfcw()
+{
+    return;
+}
+
+/**
+ * @brief Converts a Morse code character into its duration and tone status.
+ *
+ * @details This method translates a Morse code symbol into a pair representing:
+ *          - The number of time units it should last.
+ *          - Whether it corresponds to an audible tone (`true`) or a silent gap (`false`).
+ *
+ * Supported characters:
+ * - `'.'` (dit): 1 unit with tone.
+ * - `'-'` (dah): 3 units with tone.
+ * - `' '` (space): 1 unit without tone (used for intra-character or word spacing).
+ * - Any other character is ignored (returns {0, false}).
+ *
+ * @param c The Morse code character to interpret.
+ * @return A pair where:
+ *         - `first` is the number of timing units.
+ *         - `second` is `true` if it produces a tone, `false` for silence.
+ */
+std::pair<int, bool> WsprTransmitter::morse_char_to_units(char c)
+{
+    switch (c)
+    {
+    case '.':
+        return {1, true};
+    case '-':
+        return {3, true};
+    case ' ':
+        return {1, false};
+    default:
+        return {0, false}; // Skip
+    }
 }
 
 /**
@@ -1852,6 +2152,44 @@ void WsprTransmitter::create_dma_pages(
     // on a 64-bit build, DMA regs are only 32 bits wide
     DMA0->CONBLK_AD = static_cast<uint32_t>(instr_page_.b);
     DMA0->CS = (1 << 0) | (255 << 16); // Enable DMA, priority level 255
+}
+
+/**
+ * @brief Create a vector of DMA pages for a specific frequency.
+ *
+ * @details This function generates the packed frequency divisor table
+ *          using `create_dma_freq_table()` for the given frequency,
+ *          wraps it in a `DmaPage` struct, and returns it inside a vector.
+ *          This structure is used to represent DMA-friendly waveform data
+ *          for a specific output frequency.
+ *
+ * @param freq The desired output frequency in Hz.
+ *
+ * @return A vector of `DmaPage` structures, each containing the DMA waveform
+ *         data for the specified frequency.
+ */
+std::vector<WsprTransmitter::DmaPage> WsprTransmitter::create_dma_pages(double freq)
+{
+    if (debug)
+        std::cerr << debug_tag
+                  << " Creating DMA pages for freq = "
+                  << freq
+                  << " Hz"
+                  << std::endl;
+
+    std::vector<DmaPage> result;
+
+    // Generate the packed frequency divisor table
+    std::vector<uint32_t> packed_table = create_dma_freq_table(freq);
+
+    // Wrap the packed table into a DmaPage
+    DmaPage page;
+    page.data = std::move(packed_table);
+
+    // Store the page in the result vector
+    result.push_back(std::move(page));
+
+    return result;
 }
 
 /**
