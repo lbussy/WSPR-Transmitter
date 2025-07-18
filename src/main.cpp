@@ -39,6 +39,9 @@ static constexpr double QRSS_40M = 7039900.0;
 static constexpr double QRSS_20M = 14096900.0;
 static constexpr double QRSS_FREQ = QRSS_80M;
 
+// FSKCW/DRCW
+static constexpr double OFFSET = 50.0;
+
 // Debug print tag
 inline constexpr std::string_view main_debug_tag{"[Test Rig        ] "};
 
@@ -118,8 +121,9 @@ WsprTransmitter::Mode select_mode()
     std::cout << "Select mode:" << std::endl;
     std::cout << "\t1) WSPR" << std::endl;
     std::cout << "\t2) QRSS" << std::endl;
-    std::cout << "\t3) TONE" << std::endl;
-    std::cout << "Enter [1/2/3]: " << std::endl << std::flush;
+    std::cout << "\t3) FSKCW" << std::endl;
+    std::cout << "\t4) TONE" << std::endl;
+    std::cout << "Enter [1-4]: " << std::endl << std::flush;
 
     fd_set rfds;
     while (!g_terminate.load())
@@ -152,6 +156,8 @@ WsprTransmitter::Mode select_mode()
                 if (c == '2')
                     return WsprTransmitter::Mode::QRSS;
                 if (c == '3')
+                    return WsprTransmitter::Mode::FSKCW;
+                if (c == '4')
                     return WsprTransmitter::Mode::TONE;
                 return WsprTransmitter::Mode::UNKNOWN;
             }
@@ -289,6 +295,23 @@ int main()
         std::string morseString = morseTx.getMessage();
         wsprTransmitter.setupQRSSTransmission(morseString, QRSS_FREQ, DIT_LENGTH, config.ppm, GPIO_POWER);
     }
+    else if (mode == WsprTransmitter::Mode::FSKCW)
+    {
+        std::cout << main_debug_tag << "FSKCW Payload:     '" << QRSS_MESSAGE << "'" << std::endl;
+        wsprTransmitter.setSymbolCallback(
+            [](char sym, std::chrono::nanoseconds duration)
+            {
+                std::cout << main_debug_tag
+                          << "Symbol: '"
+                          << sym
+                          << "' duration: " << std::fixed << std::setprecision(3)
+                          << duration.count() / 1e6 << "ms." << std::endl;
+            });
+        MorseCodeGenerator morseTx;
+        morseTx.setMessage(QRSS_MESSAGE);
+        std::string morseString = morseTx.getMessage();
+        wsprTransmitter.setupFSKCWTransmission(morseString, QRSS_FREQ, OFFSET, DIT_LENGTH, config.ppm, GPIO_POWER);
+    }
     else if (mode == WsprTransmitter::Mode::TONE)
     {
         wsprTransmitter.setupToneTransmission(WSPR_FREQ, GPIO_POWER, config.ppm);
@@ -302,6 +325,8 @@ int main()
         std::cout << "WSPR";
     else if (mode == WsprTransmitter::Mode::QRSS)
         std::cout << "QRSS";
+    else if (mode == WsprTransmitter::Mode::FSKCW)
+        std::cout << "FSKCW";
     else
         std::cout << "TONE";
     std::cout << " complete." << std::endl;
@@ -352,6 +377,24 @@ int main()
         else
         {
             std::cout << main_debug_tag << "Interrupted. Aborting QRSS transmission." << std::endl;
+        }
+    }
+    else if (mode == WsprTransmitter::Mode::FSKCW)
+    {
+        std::unique_lock<std::mutex> lk(g_end_mtx);
+        while (!g_transmission_done &&
+               !g_terminate.load(std::memory_order_acquire))
+        {
+            g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
+        }
+
+        if (g_transmission_done)
+        {
+            std::cout << main_debug_tag << "FSKCW transmission complete." << std::endl;
+        }
+        else
+        {
+            std::cout << main_debug_tag << "Interrupted. Aborting FSKCW transmission." << std::endl;
         }
     }
     else if (!g_terminate.load(std::memory_order_acquire))

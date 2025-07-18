@@ -38,6 +38,7 @@
 #include <cstdint> // for std::uint32_t, etc.
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -155,12 +156,42 @@ public:
         int power);
 
     /**
-     * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
+     * @brief Set up an FSKCW transmission with specified parameters.
      *
-     * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
-     * @throws std::runtime_error if peripherals aren’t mapped.
+     * @details This configures a Morse-code message to be sent using Frequency
+     * Shift Keyed Continuous Wave (FSKCW) modulation. In FSKCW mode:
+     * - The carrier is **always on**.
+     * - Symbol elements (dots, dashes, spaces) are encoded by **frequency shift**.
+     * - Tone-on elements (dots/dashes) use the base frequency.
+     * - Pauses (intra-element and inter-symbol) use a frequency offset downward.
+     *
+     * This setup must be followed by `enableTransmission()` to begin.
+     *
+     * @param cw_message The Morse code message to transmit (e.g., ".-- ... .--. .-.").
+     *                   This string must already include pre-tokenized elements from
+     *                   the MorseCodeGenerator: '.', '-', and ' ' only.
+     * @param frequency The base frequency (in Hz) for tone-on elements.
+     * @param offset_hz The downward frequency shift (in Hz) to use during pauses.
+     * @param unit_seconds The duration of a dot element (in seconds).
+     * @param ppm Parts-per-million correction for frequency accuracy.
+     * @param power Drive strength index (0–7) for GPIO output level.
      */
-    void updateDMAForPPM(double ppm_new);
+    void setupFSKCWTransmission(
+        std::string_view cw_message,
+        double frequency,
+        double offset_hz,
+        int unit_seconds,
+        double ppm,
+        int power);
+
+    // TODO:
+    void setupDFCWTransmission(
+        std::string_view cw_message,
+        double frequency,
+        double offset_hz,
+        int unit_seconds,
+        double ppm,
+        int power);
 
     /**
      * @brief Configure POSIX scheduling policy & priority for future transmissions.
@@ -534,6 +565,9 @@ private:
         std::string qrss_message = ""; ///< Morse message to send
         int qrss_unit_length = 3;      ///< Duration of a dot (in seconds)
 
+        // FSKCW-specifc
+        double fskcw_offset = 5.0; ///< Downward frequency shift (Hz) during FSKCW spacing
+
         // Runtime buffers
         std::vector<uint8_t> symbols;                                          ///< Encoded symbol sequence
         std::vector<uint32_t> dma_table_freq = std::vector<uint32_t>(1024, 0); ///< DMA frequency table
@@ -553,48 +587,41 @@ private:
      */
     struct WsprTransmissionParams trans_params_;
 
+    // TODO:
+    std::vector<uint32_t> dma_table_freq_base_;    ///< Precomputed base tone DMA table
+    std::vector<uint32_t> dma_table_freq_shifted_; ///< Precomputed alternate (shifted) tone DMA table
+    std::vector<uint32_t> dma_table_freq_;         ///< Active DMA frequency table (used by transmit_symbol)
+
     /**
      * @brief DMA configuration and saved state for transmission setup/cleanup.
      *
      * @details Stores both the nominal and (PPM‑corrected) PLLD clock frequencies,
      *          mailbox memory flags, the virtual base address for peripheral access,
      *          and the original register values that must be restored when
-     *          tearing down DMA/PWM configuration.
+     *          tearing down DMA/PWM configuration. Also includes the default
+     *          frequency table length used for CW symbol generation.
      */
     struct DMAConfig
     {
-        double plld_nominal_freq;                  ///< PLLD clock frequency in Hz before any PPM correction.
-        double plld_clock_frequency;               ///< PLLD clock frequency in Hz after PPM correction.
-        volatile uint8_t *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
-        uint32_t orig_gp0ctl;                      ///< Saved GP0CTL register (clock control).
-        uint32_t orig_gp0div;                      ///< Saved GP0DIV register (clock divider).
-        uint32_t orig_pwm_ctl;                     ///< Saved PWM control register.
-        uint32_t orig_pwm_sta;                     ///< Saved PWM status register.
-        uint32_t orig_pwm_rng1;                    ///< Saved PWM range register 1.
-        uint32_t orig_pwm_rng2;                    ///< Saved PWM range register 2.
-        uint32_t orig_pwm_fifocfg;                 ///< Saved PWM FIFO configuration register.
+        double plld_nominal_freq{
+            500000000.0 * (1.0 - 2.5e-6)}; ///< PLLD clock frequency in Hz before any PPM correction.
 
-        /**
-         * @brief Construct a new DMAConfig with default (nominal) settings.
-         *
-         * @details Initializes:
-         *   - `plld_nominal_freq` to 500 MHz with the built‑in 2.5 ppm correction.
-         *   - `plld_clock_frequency` equal to `plld_nominal_freq`.
-         *   - All pointers and saved‑register fields to zero or nullptr.
-         */
-        DMAConfig()
-            : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
-              plld_clock_frequency(plld_nominal_freq),
-              peripheral_base_virtual(nullptr),
-              orig_gp0ctl(0),
-              orig_gp0div(0),
-              orig_pwm_ctl(0),
-              orig_pwm_sta(0),
-              orig_pwm_rng1(0),
-              orig_pwm_rng2(0),
-              orig_pwm_fifocfg(0)
-        {
-        }
+        double plld_clock_frequency{
+            plld_nominal_freq}; ///< PLLD clock frequency in Hz after PPM correction.
+
+        volatile uint8_t *peripheral_base_virtual{
+            nullptr}; ///< Virtual base pointer for /dev/mem mapping of peripherals.
+
+        uint32_t orig_gp0ctl{0};      ///< Saved GP0CTL register (clock control).
+        uint32_t orig_gp0div{0};      ///< Saved GP0DIV register (clock divider).
+        uint32_t orig_pwm_ctl{0};     ///< Saved PWM control register.
+        uint32_t orig_pwm_sta{0};     ///< Saved PWM status register.
+        uint32_t orig_pwm_rng1{0};    ///< Saved PWM range register 1.
+        uint32_t orig_pwm_rng2{0};    ///< Saved PWM range register 2.
+        uint32_t orig_pwm_fifocfg{0}; ///< Saved PWM FIFO configuration register.
+
+        std::size_t freq_table_length{
+            512}; ///< Number of entries in each precomputed frequency table (default: 512).
     };
 
     /**
@@ -761,9 +788,12 @@ private:
     void transmit();
 
     // TODO:
+    std::pair<int, bool> morse_char_to_units(char c);
     void transmit_tone();
     void transmit_wspr();
     void transmit_qrss();
+    void transmit_fskcw();
+    void transmit_dfcw();
 
     /**
      * @brief Waits for the background transmission thread to finish.
@@ -1007,6 +1037,15 @@ private:
      * @param[in,out] const_page_ The PageInfo structure for storing tuning words.
      */
     void setup_dma_freq_table(double &center_freq_actual);
+
+    // TODO:
+    void setupCWTransmission(
+        double base_freq,
+        std::optional<double> alt_freq,
+        double ppm);
+
+    // TODO:
+    std::vector<uint32_t> create_dma_freq_table(double freq);
 
     /**
      * @brief Entry point for the background transmission thread.

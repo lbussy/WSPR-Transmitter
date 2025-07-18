@@ -257,14 +257,12 @@ void WsprTransmitter::setupToneTransmission(
     // Initialize DMA and clocks
     setup_dma();
 
-    dma_config_.plld_clock_frequency =
-        dma_config_.plld_nominal_freq * (1 - ppm / 1e6);
+    // Reuse shared CW setup for single-tone mode
+    setupCWTransmission(frequency, std::nullopt, ppm);
 
-    double center_actual = frequency;
-    setup_dma_freq_table(center_actual);
-
+    // Optional: update actual center freq if you recompute or adjust it
     if (frequency != 0.0)
-        trans_params_.frequency = center_actual;
+        trans_params_.frequency = frequency;
 }
 
 // TODO:
@@ -327,6 +325,8 @@ void WsprTransmitter::setupWSPRTransmission(
     if (frequency != 0.0)
         trans_params_.frequency = center_actual;
 }
+
+// TODO:
 void WsprTransmitter::setupQRSSTransmission(
     std::string_view cw_message,
     double frequency,
@@ -353,28 +353,76 @@ void WsprTransmitter::setupQRSSTransmission(
     trans_params_.power = power;
     trans_params_.use_offset = false;
 
-    // DMA setup for QRSS tone generation
+    // DMA setup
     setup_dma();
+
+    // Precompute frequency table for QRSS tone (single-tone mode)
+    setupCWTransmission(frequency, std::nullopt, ppm);
 }
 
 /**
- * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
+ * @brief Set up an FSKCW transmission with specified parameters.
  *
- * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
- * @throws std::runtime_error if peripherals aren’t mapped.
+ * @details This configures a Morse-code message to be sent using Frequency
+ * Shift Keyed Continuous Wave (FSKCW) modulation. In this mode:
+ * - The carrier is always on.
+ * - Dots and dashes are transmitted at the base frequency.
+ * - Spacing elements (intra-character and inter-symbol) are sent using a
+ *   frequency offset downward from the base.
+ *
+ * This function must be followed by `enableTransmission()` to start sending.
+ *
+ * @param cw_message The Morse code message to transmit, consisting only of
+ *                   '.', '-', and ' ' characters.
+ * @param frequency The base frequency in Hz for tone-on elements (dots/dashes).
+ * @param offset_hz Frequency offset in Hz used for space elements (carrier remains on).
+ * @param unit_seconds Length in seconds of a single dot element.
+ * @param ppm Frequency correction in parts per million.
+ * @param power Output drive level (0–7) for GPIO carrier strength.
  */
-void WsprTransmitter::updateDMAForPPM(double ppm_new)
+void WsprTransmitter::setupFSKCWTransmission(
+    std::string_view cw_message,
+    double frequency,
+    double offset_hz,
+    int unit_seconds,
+    double ppm,
+    int power)
 {
-    // Apply the PPM correction to your working PLLD clock.
-    dma_config_.plld_clock_frequency =
-        dma_config_.plld_nominal_freq * (1.0 - ppm_new / 1e6);
+    // Stop and clean up if DMA was previously configured
+    if (dma_setup_done_)
+    {
+        disableTransmission();
+        dma_cleanup();
+    }
 
-    // Recompute the DMA frequency table in place.
-    // Pass in your current center frequency so it can adjust if needed.
-    double center_actual = trans_params_.frequency;
-    setup_dma_freq_table(center_actual);
-    if (trans_params_.frequency != 0.0)
-        trans_params_.frequency = center_actual;
+    stop_requested_.store(false);
+
+    // Store FSKCW transmission parameters
+    trans_params_.mode = Mode::FSKCW;
+    trans_params_.qrss_message = std::string(cw_message);
+    trans_params_.frequency = frequency;
+    trans_params_.fskcw_offset = offset_hz;
+    trans_params_.qrss_unit_length = unit_seconds;
+    trans_params_.ppm = ppm;
+    trans_params_.power = power;
+    trans_params_.use_offset = false;
+
+    // Set up DMA system (clock registers, mailbox memory, etc.)
+    setup_dma();
+
+    // Precompute tone tables for base frequency and spacing frequency
+    setupCWTransmission(frequency, frequency - offset_hz, ppm);
+}
+
+void WsprTransmitter::setupDFCWTransmission(
+    std::string_view cw_message,
+    double frequency,
+    double offset_hz,
+    int unit_seconds,
+    double ppm,
+    int power)
+{
+    return;
 }
 
 /**
@@ -410,13 +458,25 @@ void WsprTransmitter::setThreadScheduling(int policy, int priority)
 void WsprTransmitter::enableTransmission()
 {
     stop_requested_.store(false, std::memory_order_release);
-    if (trans_params_.mode == Mode::QRSS || trans_params_.mode == Mode::TONE)
+    // TODO:  Scheduling is bypased here
+    if (trans_params_.mode == Mode::QRSS || trans_params_.mode == Mode::FSKCW || trans_params_.mode == Mode::DFCW)
     {
+        // Transmit immediately
         tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
+    }
+    else if (trans_params_.mode == Mode::TONE)
+    {
+        // Transmit immediately
+        tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
+    }
+    else if (trans_params_.mode == Mode::WSPR)
+    {
+        // Allow scheduler to kick in
+        scheduler_.start();
     }
     else
     {
-        scheduler_.start();
+        return;
     }
 }
 
@@ -509,6 +569,9 @@ void WsprTransmitter::printParameters()
     case Mode::QRSS:
         std::cout << "QRSS" << std::endl;
         break;
+    case Mode::FSKCW:
+        std::cout << "FSKCW" << std::endl;
+        break;
     case Mode::TONE:
         std::cout << "TONE" << std::endl;
         break;
@@ -557,6 +620,18 @@ void WsprTransmitter::printParameters()
     {
         std::cout << debug_tag << "QRSS Message:      [" << trans_params_.qrss_message << "]" << std::endl;
         std::cout << debug_tag << "Dot Duration:      " << trans_params_.qrss_unit_length << "s" << std::endl;
+    }
+    else if (trans_params_.mode == Mode::FSKCW)
+    {
+        std::cout << debug_tag << "FSKCW Message:     [" << trans_params_.qrss_message << "]" << std::endl;
+        std::cout << debug_tag << "Dot Duration:      " << trans_params_.qrss_unit_length << "s" << std::endl;
+        std::cout << debug_tag << "FSKCW Offset:      " << trans_params_.fskcw_offset << " Hz" << std::endl;
+    }
+    else if (trans_params_.mode == Mode::DFCW)
+    {
+        std::cout << debug_tag << "DFCW Message:     [" << trans_params_.qrss_message << "]" << std::endl;
+        std::cout << debug_tag << "Dot Duration:      " << trans_params_.qrss_unit_length << "s" << std::endl;
+        std::cout << debug_tag << "DFCW Offset:      " << trans_params_.fskcw_offset << " Hz" << std::endl;
     }
     else if (trans_params_.mode == Mode::TONE)
     {
@@ -626,16 +701,24 @@ void WsprTransmitter::transmit()
 
     switch (trans_params_.mode)
     {
+    case Mode::WSPR:
+        transmit_wspr();
+        break;
+
     case Mode::QRSS:
         transmit_qrss();
         break;
 
-    case Mode::TONE:
-        transmit_tone();
+    case Mode::FSKCW:
+        transmit_fskcw();
         break;
 
-    case Mode::WSPR:
-        transmit_wspr();
+    case Mode::DFCW:
+        transmit_dfcw();
+        break;
+
+    case Mode::TONE:
+        transmit_tone();
         break;
 
     default:
@@ -649,20 +732,24 @@ void WsprTransmitter::transmit_tone()
 {
     fire_start_cb("Continuous tone", trans_params_.frequency);
 
+    // Select the precomputed tone table
+    dma_table_freq_ = dma_table_freq_base_;
     transmit_on();
+
     auto t0 = std::chrono::steady_clock::now();
 
     int dummyBuf = 0;
     while (!stop_requested_.load())
     {
         transmit_symbol(
-            0,       // Symbol number
-            0.0,     // Frequency offset for test tone
+            0,       // Symbol index (not relevant here)
+            0.0,     // No offset
             dummyBuf // DMA buffer index
         );
     }
 
     transmit_off();
+
     auto t1 = std::chrono::steady_clock::now();
     double total = std::chrono::duration<double>(t1 - t0).count();
     total = std::round(total * 1000.0) / 1000.0;
@@ -729,6 +816,22 @@ void WsprTransmitter::transmit_wspr()
 }
 
 // TODO
+std::pair<int, bool> WsprTransmitter::morse_char_to_units(char c)
+{
+    switch (c)
+    {
+    case '.':
+        return {1, true};
+    case '-':
+        return {3, true};
+    case ' ':
+        return {1, false};
+    default:
+        return {0, false}; // Skip
+    }
+}
+
+// TODO
 void WsprTransmitter::transmit_qrss()
 {
     if (trans_params_.frequency == 0.0)
@@ -738,6 +841,93 @@ void WsprTransmitter::transmit_qrss()
     }
 
     fire_start_cb("QRSS Message", trans_params_.frequency);
+
+    // Use the precomputed base tone table
+    dma_table_freq_ = dma_table_freq_base_;
+
+    auto t0 = std::chrono::steady_clock::now();
+    int symbol_index = 0;
+    bool interrupted = false;
+
+    for (char c : trans_params_.qrss_message)
+    {
+        if (stop_requested_.load())
+        {
+            interrupted = true;
+            break;
+        }
+
+        auto [units, is_symbol] = morse_char_to_units(c);
+        if (units == 0)
+            continue;
+
+        std::chrono::steady_clock::time_point symbol_start;
+        std::chrono::steady_clock::time_point actual_start;
+
+        if (symbol_index == 0)
+        {
+            symbol_start = std::chrono::steady_clock::now(); // Emit first symbol immediately
+            actual_start = symbol_start;
+        }
+        else
+        {
+            symbol_start = t0 + std::chrono::seconds(symbol_index * trans_params_.qrss_unit_length);
+            sleep_until_abs(symbol_start);
+            actual_start = std::chrono::steady_clock::now();
+        }
+
+        auto symbol_end = symbol_start + std::chrono::seconds(units * trans_params_.qrss_unit_length);
+
+        if (is_symbol)
+        {
+            transmit_on();
+
+            int dummy_buf = 0;
+            double duration_s = static_cast<double>(units * trans_params_.qrss_unit_length);
+            transmit_symbol(0, duration_s, dummy_buf);
+
+            transmit_off();
+        }
+        else
+        {
+            // Space — wait it out
+            sleep_until_abs(symbol_end);
+        }
+
+        auto actual_end = std::chrono::steady_clock::now();
+
+        if (symbol_cb_)
+        {
+            auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                actual_end - actual_start);
+            symbol_cb_(c, duration);
+        }
+
+        symbol_index += units;
+    }
+
+    transmit_off(); // Final safeguard
+
+    auto t1 = std::chrono::steady_clock::now();
+    double total = std::chrono::duration<double>(t1 - t0).count();
+    total = std::round(total * 10000.0) / 10000.0;
+
+    if (interrupted)
+        fire_end_cb("QRSS transmission interrupted", total);
+    else
+        fire_end_cb("QRSS transmission complete", total);
+}
+
+// TODO:
+void WsprTransmitter::transmit_fskcw()
+{
+    if (trans_params_.frequency == 0.0)
+    {
+        fire_end_cb("Skipping FSKCW transmission (frequency = 0.0)", 0.0);
+        return;
+    }
+
+    fire_start_cb("FSKCW Message", trans_params_.frequency);
     transmit_on();
 
     auto t0 = std::chrono::steady_clock::now();
@@ -752,34 +942,55 @@ void WsprTransmitter::transmit_qrss()
             break;
         }
 
-        int units = 0;
-        bool tone_on = false;
+        auto [units, is_symbol] = morse_char_to_units(c);
+        if (units == 0)
+            continue;
 
-        switch (c)
+        std::chrono::steady_clock::time_point symbol_start;
+        std::chrono::steady_clock::time_point actual_start;
+
+        if (symbol_index == 0)
         {
-        case '.': units = 1; tone_on = true; break;
-        case '-': units = 3; tone_on = true; break;
-        case ' ': units = 1; tone_on = false; break;
-        default: continue;
+            symbol_start = std::chrono::steady_clock::now();
+            actual_start = symbol_start;
+        }
+        else
+        {
+            symbol_start = t0 + std::chrono::seconds(symbol_index * trans_params_.qrss_unit_length);
+            sleep_until_abs(symbol_start);
+            actual_start = std::chrono::steady_clock::now();
         }
 
-        auto symbol_start = t0 + std::chrono::seconds(symbol_index * trans_params_.qrss_unit_length);
-        auto symbol_end = symbol_start + std::chrono::seconds(units * trans_params_.qrss_unit_length);
+        // Select tone table and copy values into const_page_
+        dma_table_freq_ = is_symbol
+            ? dma_table_freq_base_
+            : dma_table_freq_shifted_;
 
-        sleep_until_abs(symbol_start);
-        auto actual_start = std::chrono::steady_clock::now();
+        reinterpret_cast<uint32_t *>(const_page_.v)[0] = dma_table_freq_[0];
+        reinterpret_cast<uint32_t *>(const_page_.v)[1] = dma_table_freq_[1];
 
-        if (tone_on)
-            transmit_on();
-        else
-            transmit_off();
+        if (debug)
+        {
+            double freq = is_symbol
+                ? trans_params_.frequency
+                : trans_params_.frequency - trans_params_.fskcw_offset;
 
-        sleep_until_abs(symbol_end);
+            std::cerr << "[DEBUG] Symbol '" << c << "' using freq "
+                      << freq << " Hz → DMA[0] = " << dma_table_freq_[0]
+                      << ", DMA[1] = " << dma_table_freq_[1]
+                      << std::endl;
+        }
+
+        double duration_s = static_cast<double>(units * trans_params_.qrss_unit_length);
+        int dummy_buf = 0;
+        transmit_symbol(0, duration_s, dummy_buf);
+
         auto actual_end = std::chrono::steady_clock::now();
 
         if (symbol_cb_)
         {
-            auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(actual_end - actual_start);
+            auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                actual_end - actual_start);
             symbol_cb_(c, duration);
         }
 
@@ -793,9 +1004,14 @@ void WsprTransmitter::transmit_qrss()
     total = std::round(total * 10000.0) / 10000.0;
 
     if (interrupted)
-        fire_end_cb("QRSS transmission interrupted", total);
+        fire_end_cb("FSKCW transmission interrupted", total);
     else
-        fire_end_cb("QRSS transmission complete", total);
+        fire_end_cb("FSKCW transmission complete", total);
+}
+
+void WsprTransmitter::transmit_dfcw()
+{
+    return;
 }
 
 /**
@@ -1342,9 +1558,15 @@ void WsprTransmitter::transmit_symbol(
         return;
     }
 
+    if (debug && dma_table_freq_.size() >= 2)
+        std::cerr << debug_tag
+                  << "DMA f0: " << dma_table_freq_[0]
+                  << ", f1: " << dma_table_freq_[1]
+                  << std::endl;
+
     const bool is_tone = (tsym == 0.0);
-    const int f0_idx = sym_num * 2;
-    const int f1_idx = f0_idx + 1;
+    const int f0_idx = 0;
+    const int f1_idx = 1;
 
     if (is_tone)
     {
@@ -1804,4 +2026,82 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
             assert((tuning_word[i] & (~0xFFF)) == (tuning_word[i + 1] & (~0xFFF)));
         }
     }
+}
+
+void WsprTransmitter::setupCWTransmission(
+    double base_freq,
+    std::optional<double> alt_freq,
+    double ppm)
+{
+    // Apply PPM correction to PLLD
+    dma_config_.plld_clock_frequency =
+        dma_config_.plld_nominal_freq * (1.0 - ppm / 1e6);
+
+    if (debug)
+        std::cerr
+            << "[DEBUG] PLLD clock adjusted to "
+            << dma_config_.plld_clock_frequency
+            << " Hz (PPM: " << ppm << ")"
+            << std::endl;
+
+    // Generate primary tone table
+    if (debug)
+    std::cerr << "[DEBUG] setupCWTransmission: base = "
+              << base_freq << " Hz, alt = "
+              << (alt_freq.has_value() ? std::to_string(alt_freq.value()) : "n/a")
+              << std::endl;
+    dma_table_freq_base_ = create_dma_freq_table(base_freq);
+
+    if (debug)
+        std::cerr
+            << "[DEBUG] Base freq " << base_freq
+            << " Hz → DMA[0] = " << dma_table_freq_base_[0]
+            << ", DMA[1] = " << dma_table_freq_base_[1]
+            << std::endl;
+
+    // Optional alternate tone (e.g. for spacing or dash in DFCW)
+    if (alt_freq.has_value())
+    {
+        dma_table_freq_shifted_ = create_dma_freq_table(alt_freq.value());
+
+        if (debug)
+            std::cerr
+                << "[DEBUG] Shifted freq " << alt_freq.value()
+                << " Hz → DMA[0] = " << dma_table_freq_shifted_[0]
+                << ", DMA[1] = " << dma_table_freq_shifted_[1]
+                << std::endl;
+    }
+    else
+    {
+        dma_table_freq_shifted_.clear();
+    }
+
+    // Clear default table to ensure transmit_symbol uses current one
+    dma_table_freq_.clear();
+}
+
+std::vector<uint32_t> WsprTransmitter::create_dma_freq_table(double freq)
+{
+    if (debug)
+        std::cerr << "[DEBUG] Creating DMA table for freq = " << freq << " Hz" << std::endl;
+
+    std::vector<uint32_t> table;
+
+    uint32_t plld_clock = dma_config_.plld_clock_frequency;
+    double div = static_cast<double>(plld_clock) / freq;
+    uint32_t divi = static_cast<uint32_t>(div);
+    uint32_t divf = static_cast<uint32_t>((div - divi) * 4096.0);
+    uint32_t packed_div = (divi << 12) | (divf & 0xFFF);
+
+    if (debug)
+        std::cerr
+            << "[DEBUG] Calculated divisor for " << freq << " Hz is "
+            << divi << " + " << divf << "/4096"
+            << " → packed = 0x" << std::hex << packed_div << std::dec
+            << std::endl;
+
+    for (std::size_t i = 0; i < dma_config_.freq_table_length; ++i)
+        table.push_back(packed_div);
+
+    return table;
 }
