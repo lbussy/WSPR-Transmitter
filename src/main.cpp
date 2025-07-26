@@ -24,10 +24,22 @@ static constexpr std::string_view GRID= "EM18";
 static constexpr uint8_t POWER_DBM = 20;
 
 // Frequency choices
+static constexpr double _2200m = 137500.0;
+static constexpr double _160m = 1838100.0;
 static constexpr double _80m = 3568600.0;
+static constexpr double _60m = 5288700.0;
 static constexpr double _40m = 7038600.0;
+static constexpr double _30m = 10140200.0;
+static constexpr double _22m = 13555400.0;
 static constexpr double _20m = 14095600.0;
-static constexpr double FREQ = _80m;
+static constexpr double _17m = 18106100.0;
+static constexpr double _15m = 21096100.0;
+static constexpr double _12m = 24926100.0;
+static constexpr double _10m = 28126100.0;
+static constexpr double _6m = 50294500.0;
+static constexpr double _test = 25000000.0;
+
+static constexpr double WSPR_FREQ = _40m;
 
 // Thread tracking/execution
 static std::mutex g_end_mtx;
@@ -309,12 +321,12 @@ int main()
 
         // Set minimum transmission data
         wsprTransmitter.setupTransmission(
-            FREQ, 0, config.ppm,
+            WSPR_FREQ, 0, config.ppm,
             CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
     }
     else
     {
-        wsprTransmitter.setupTransmission(FREQ, 0, config.ppm);
+        wsprTransmitter.setupTransmission(WSPR_FREQ, 0, config.ppm);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT
