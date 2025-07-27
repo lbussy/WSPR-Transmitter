@@ -465,6 +465,12 @@ private:
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
 
     /**
+     * @brief Offset for DMA channel 5 control block registers.
+     * This channel is used by default for mailbox-allocated DMA operations.
+     */
+    static constexpr uint32_t DMA_CHANNEL_OFFSET = 0x100 * 5;  // Channel 5
+
+    /**
      * @brief The nominal number of PWM clock cycles per iteration.
      *
      * This constant defines the expected number of PWM clock cycles required for
@@ -908,6 +914,11 @@ private:
      */
     void disable_clock();
 
+    // TODO:
+    void disable_pwm();
+    void enable_pwm();
+    void reset_pll_and_pwm();
+
     /**
      * @brief Enables TX by configuring GPIO4 and setting the clock source.
      * @details Configures GPIO4 to use alternate function 0 (GPCLK0), sets the drive
@@ -968,6 +979,8 @@ private:
         struct PageInfo &const_page_,
         struct PageInfo &instr_page_,
         struct PageInfo instructions_[]);
+
+    void force_plld_and_gpclk0();
 
     /**
      * @brief Configure and initialize the DMA system for WSPR transmission.

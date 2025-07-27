@@ -39,7 +39,7 @@ static constexpr double _10m = 28126100.0;
 static constexpr double _6m = 50294500.0;
 static constexpr double _test = 25000000.0;
 
-static constexpr double WSPR_FREQ = _40m;
+static constexpr double WSPR_FREQ = _20m;
 
 // Thread tracking/execution
 static std::mutex g_end_mtx;
@@ -328,6 +328,8 @@ int main()
     {
         wsprTransmitter.setupTransmission(WSPR_FREQ, 0, config.ppm);
     }
+
+
 
 #ifdef DEBUG_WSPR_TRANSMIT
     wsprTransmitter.printParameters();
