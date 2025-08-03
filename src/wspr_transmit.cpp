@@ -609,13 +609,20 @@ void WsprTransmitter::transmit()
     // Choose tone vs WSPR
     if (trans_params_.is_tone)
     {
-        int dummyBuf = 0;
+        std::uint32_t dummyBuf = 0;
 
         // Enable PWM clock and DMA transmission
         transmit_on();
+
         // Continuous tone loop — exit as soon as stop_requested_ is true
         while (!stop_requested_.load())
         {
+            if (debug)
+            {
+                std::cerr << debug_tag << "Sending sym " << 0
+                          << " with tsym = " << dummyBuf << std::endl;
+            }
+
             transmit_symbol(
                 0,       // Symbol number
                 0.0,     // Test-tone
@@ -627,7 +634,7 @@ void WsprTransmitter::transmit()
     else
     {
         // Initialize DMA buffer index
-        int bufPtr = 0;
+        std::uint32_t bufPtr = 0;
 
         // Fire callback with frequency as an argument
         fire_start_cb("", trans_params_.frequency);
@@ -637,39 +644,48 @@ void WsprTransmitter::transmit()
         struct timespec t0_ts;
         clock_gettime(CLOCK_MONOTONIC, &t0_ts);
 
-        const int symbol_count = static_cast<int>(trans_params_.symbols.size());
-        const double symtime = trans_params_.symtime; // e.g. 0.682667 s
-
         // Begin transmission
         transmit_on();
-        for (int i = 0; i < symbol_count && !stop_requested_.load(); ++i)
+
+        for (std::size_t i = 0; i < trans_params_.symbols.size() && !stop_requested_.load(); ++i)
         {
-            // Compute absolute target time = t0_ts + i * symtime
-            long offset_ns = static_cast<long>(i * symtime * 1e9);
-            struct timespec target = t0_ts;
-            target.tv_sec += offset_ns / 1000000000;
-            target.tv_nsec += offset_ns % 1000000000;
-            if (target.tv_nsec >= 1000000000)
+            // Compute absolute target time = t0_ts + i * symtime (with correct overflow-safe math)
+            const auto offset_ns = std::chrono::nanoseconds(
+                static_cast<int64_t>(std::llround(i * trans_params_.symtime * 1e9)));
+
+            // Split secs and nsecs to prevent overflow on 32-bit
+            struct timespec target = {
+                .tv_sec = t0_ts.tv_sec + static_cast<time_t>(offset_ns.count() / 1'000'000'000),
+                .tv_nsec = t0_ts.tv_nsec + static_cast<long>(offset_ns.count() % 1'000'000'000)};
+            // Handle any overflow
+            if (target.tv_nsec >= 1'000'000'000)
             {
                 target.tv_sec++;
-                target.tv_nsec -= 1000000000;
+                target.tv_nsec -= 1'000'000'000;
             }
 
-            // Sleep until the exact slot
+            // Sleep until the correct absolute time
             sleep_until_abs(target);
 
             // Emit symbol i for exactly symtime seconds
             transmit_symbol(
                 static_cast<int>(trans_params_.symbols[i]),
-                symtime,
+                trans_params_.symtime,
                 bufPtr);
         }
+
         transmit_off();
 
         // Measure actual elapsed time in seconds, round to 3 decimals
         auto t1 = std::chrono::steady_clock::now();
         double total = std::chrono::duration<double>(t1 - t0_chrono).count();
         total = std::round(total * 1000.0) / 1000.0;
+
+        if (debug)
+        {
+            std::cerr << debug_tag << "transmit() Expected duration: " << trans_params_.symbols.size() * trans_params_.symtime << " s" << std::endl;
+            std::cerr << debug_tag << "transmit() Actual duration: " << total << " s" << std::endl;
+        }
 
         // Invoke the completion callback if set
         fire_end_cb("", total);
