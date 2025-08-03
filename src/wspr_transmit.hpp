@@ -934,7 +934,7 @@ private:
     void transmit_symbol(
         const int &sym_num,
         const double &tsym,
-        int &bufPtr);
+        std::uint32_t &bufPtr);
 
     /**
      * @brief Disables and resets the DMA engine.

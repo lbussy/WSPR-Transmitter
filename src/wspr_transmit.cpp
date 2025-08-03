@@ -1225,7 +1225,7 @@ void WsprTransmitter::transmit_off()
 void WsprTransmitter::transmit_symbol(
     const int &sym_num,
     const double &tsym,
-    int &bufPtr)
+    std::uint32_t &bufPtr)
 {
     // Early-exit if a stop was already requested
     if (stop_requested_.load(std::memory_order_acquire))
