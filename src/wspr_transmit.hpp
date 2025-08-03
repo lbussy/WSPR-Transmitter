@@ -355,6 +355,24 @@ private:
      */
     struct PageInfo instr_page_;
 
+    static constexpr std::size_t DMA_TABLE_SIZE = 1024;
+    static constexpr std::uint32_t DMA_TABLE_MASK = DMA_TABLE_SIZE - 1;  // 0x3FF
+
+    struct DmaBuffer
+    {
+        std::uint32_t data[2];
+    };
+
+    struct DmaInstruction
+    {
+        std::uint32_t SOURCE_AD;
+        std::uint32_t TXFR_LEN;
+        std::uint32_t NEXTCONBK;
+    };
+
+    std::array<DmaBuffer, DMA_TABLE_SIZE> dma_buffers_;
+    std::array<DmaInstruction, DMA_TABLE_SIZE> dma_instructions_;
+
     /**
      * @brief Array of page information structures for DMA control blocks.
      *
@@ -362,7 +380,7 @@ private:
      * instruction chain. It holds 1024 entries, corresponding to the 1024 DMA control blocks used
      * for managing data transfers.
      */
-    struct PageInfo instructions_[1024];
+    struct PageInfo instructions_[DMA_TABLE_SIZE];
 
     /**
      * @brief Random frequency offset for standard WSPR transmissions.
@@ -477,7 +495,7 @@ private:
      * a single iteration of the waveform generation process. It serves as a reference
      * value to maintain precise timing in signal generation.
      */
-    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
+    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 4096;
 
     /**
      * @brief Drive strength lookup table for GPIO output levels.
@@ -539,7 +557,7 @@ private:
               power(0),
               symtime(0.0),
               tone_spacing(0.0),
-              dma_table_freq(1024, 0.0),
+              dma_table_freq(DMA_TABLE_SIZE, 0.0),
               use_offset(false)
         {
         }
@@ -932,6 +950,13 @@ private:
      */
     void transmit_off();
 
+    double get_pwm_clock() const;
+
+    void verify_symbol_duration(
+        double tsym,
+        std::size_t chunk_count,
+        const std::string& label);
+
     /**
      * @brief Transmits a symbol for a specified duration using DMA.
      * @details Configures the DMA to transmit a symbol (tone) for the specified
@@ -943,9 +968,9 @@ private:
      * @param[in,out] bufPtr The buffer pointer index for DMA instruction handling.
      */
     void transmit_symbol(
-        const int &sym_num,
-        const double &tsym,
-        int &bufPtr);
+        int sym_num,
+        double tsym,
+        std::uint32_t& bufPtr);
 
     /**
      * @brief Disables and resets the DMA engine.

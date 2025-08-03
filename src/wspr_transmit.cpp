@@ -607,13 +607,20 @@ void WsprTransmitter::transmit()
     // Choose tone vs WSPR
     if (trans_params_.is_tone)
     {
-        int dummyBuf = 0;
+        std::uint32_t dummyBuf = 0;
 
         // Enable PWM clock and DMA transmission
         transmit_on();
+
         // Continuous tone loop — exit as soon as stop_requested_ is true
         while (!stop_requested_.load())
         {
+            if (debug)
+            {
+                std::cerr << debug_tag << "Sending sym " << 0
+                          << " with tsym = " << dummyBuf << std::endl;
+            }
+
             transmit_symbol(
                 0,       // Symbol number
                 0.0,     // Test-tone
@@ -625,7 +632,7 @@ void WsprTransmitter::transmit()
     else
     {
         // Initialize DMA buffer index
-        int bufPtr = 0;
+        std::uint32_t bufPtr = 0;
 
         // Fire callback with frequency as an argument
         fire_start_cb("", trans_params_.frequency);
@@ -635,39 +642,48 @@ void WsprTransmitter::transmit()
         struct timespec t0_ts;
         clock_gettime(CLOCK_MONOTONIC, &t0_ts);
 
-        const int symbol_count = static_cast<int>(trans_params_.symbols.size());
-        const double symtime = trans_params_.symtime; // e.g. 0.682667 s
-
         // Begin transmission
         transmit_on();
-        for (int i = 0; i < symbol_count && !stop_requested_.load(); ++i)
+
+        for (std::size_t i = 0; i < trans_params_.symbols.size() && !stop_requested_.load(); ++i)
         {
-            // Compute absolute target time = t0_ts + i * symtime
-            long offset_ns = static_cast<long>(i * symtime * 1e9);
-            struct timespec target = t0_ts;
-            target.tv_sec += offset_ns / 1000000000;
-            target.tv_nsec += offset_ns % 1000000000;
-            if (target.tv_nsec >= 1000000000)
+            // Compute absolute target time = t0_ts + i * symtime (with correct overflow-safe math)
+            const auto offset_ns = std::chrono::nanoseconds(
+                static_cast<int64_t>(std::llround(i * trans_params_.symtime * 1e9)));
+
+            // Split secs and nsecs to prevent overflow on 32-bit
+            struct timespec target = {
+                .tv_sec = t0_ts.tv_sec + static_cast<time_t>(offset_ns.count() / 1'000'000'000),
+                .tv_nsec = t0_ts.tv_nsec + static_cast<long>(offset_ns.count() % 1'000'000'000)};
+            // Handle any overflow
+            if (target.tv_nsec >= 1'000'000'000)
             {
                 target.tv_sec++;
-                target.tv_nsec -= 1000000000;
+                target.tv_nsec -= 1'000'000'000;
             }
 
-            // Sleep until the exact slot
+            // Sleep until the correct absolute time
             sleep_until_abs(target);
 
             // Emit symbol i for exactly symtime seconds
             transmit_symbol(
                 static_cast<int>(trans_params_.symbols[i]),
-                symtime,
+                trans_params_.symtime,
                 bufPtr);
         }
+
         transmit_off();
 
         // Measure actual elapsed time in seconds, round to 3 decimals
         auto t1 = std::chrono::steady_clock::now();
         double total = std::chrono::duration<double>(t1 - t0_chrono).count();
         total = std::round(total * 1000.0) / 1000.0;
+
+        if (debug)
+        {
+            std::cerr << debug_tag << "transmit() Expected duration: " << trans_params_.symbols.size() * trans_params_.symtime << " s" << std::endl;
+            std::cerr << debug_tag << "transmit() Actual duration: " << total << " s" << std::endl;
+        }
 
         // Invoke the completion callback if set
         fire_end_cb("", total);
@@ -715,10 +731,10 @@ void WsprTransmitter::reset_pll_and_pwm()
     access_bus_address(CM_GP0CTL_BUS) = 0x5A000000;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-    access_bus_address(CM_GP0DIV_BUS) = 0x5A000000 | (2 << 12);  // divisor = 2
+    access_bus_address(CM_GP0DIV_BUS) = 0x5A000000 | (2 << 12); // divisor = 2
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-    access_bus_address(CM_GP0CTL_BUS) = 0x5A000016;  // enable | plld source
+    access_bus_address(CM_GP0CTL_BUS) = 0x5A000016; // enable | plld source
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     if (debug)
@@ -765,7 +781,7 @@ void WsprTransmitter::dma_cleanup()
     dma_setup_done_ = false;
     const_page_ = {};
     instr_page_ = {};
-    for (int i = 0; i < 1024; ++i)
+    for (std::size_t i = 0; i < DMA_TABLE_SIZE; ++i)
         instructions_[i] = {};
 }
 
@@ -1165,7 +1181,7 @@ void WsprTransmitter::disable_pwm()
         return;
 
     uint32_t ctl = access_bus_address(PWM_BUS_BASE + 0x00);
-    ctl &= ~(0x1 | (1 << 8) | (1 << 9));  // Clear PWMEN, MSEN1, MSEN2
+    ctl &= ~(0x1 | (1 << 8) | (1 << 9)); // Clear PWMEN, MSEN1, MSEN2
     access_bus_address(PWM_BUS_BASE + 0x00) = 0x5A000000 | ctl;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
@@ -1176,7 +1192,7 @@ void WsprTransmitter::enable_pwm()
         return;
 
     uint32_t ctl = access_bus_address(PWM_BUS_BASE + 0x00);
-    ctl |= (0x1 | (1 << 8) | (1 << 9));  // Set PWMEN, MSEN1, MSEN2
+    ctl |= (0x1 | (1 << 8) | (1 << 9)); // Set PWMEN, MSEN1, MSEN2
     access_bus_address(PWM_BUS_BASE + 0x00) = 0x5A000000 | ctl;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
@@ -1225,6 +1241,43 @@ void WsprTransmitter::transmit_off()
     disable_clock();
 }
 
+double WsprTransmitter::get_pwm_clock() const
+{
+    const uint32_t div = dma_config_.orig_gp0div;
+    const double int_part = static_cast<double>((div >> 12) & 0xFFF);
+    const double frac_part = static_cast<double>(div & 0xFFF) / 4096.0;
+    return dma_config_.plld_clock_frequency / (int_part + frac_part);
+}
+
+void WsprTransmitter::verify_symbol_duration(
+    double tsym,
+    std::size_t chunk_count,
+    const std::string &label)
+{
+    const std::uint64_t expected_clocks = static_cast<std::uint64_t>(
+        std::llround(tsym * get_pwm_clock()));
+
+    const std::uint64_t actual_clocks = chunk_count * PWM_CLOCKS_PER_ITER_NOMINAL;
+
+    if (debug)
+    {
+        std::cerr << debug_tag
+                  << label << ": "
+                  << actual_clocks << " / "
+                  << expected_clocks << " clocks"
+                  << std::endl;
+    }
+
+    constexpr std::uint64_t TOLERANCE = 16;
+    if (std::llabs(static_cast<long long>(actual_clocks - expected_clocks)) > TOLERANCE)
+    {
+        std::cerr << debug_tag
+                  << "WARNING: Mismatch in symbol timing for "
+                  << label << ": expected " << expected_clocks
+                  << ", got " << actual_clocks
+                  << std::endl;
+    }
+}
 /**
  * @brief Transmits a symbol for a specified duration using DMA.
  * @details Configures the DMA to transmit a symbol (tone) for the specified
@@ -1236,139 +1289,114 @@ void WsprTransmitter::transmit_off()
  * @param[in,out] bufPtr The buffer pointer index for DMA instruction handling.
  */
 void WsprTransmitter::transmit_symbol(
-    const int &sym_num,
-    const double &tsym,
-    int &bufPtr)
+    int sym_num,
+    double tsym,
+    std::uint32_t &bufPtr)
 {
-    // Early-exit if a stop was already requested
-    if (stop_requested_.load(std::memory_order_acquire))
+    if (debug)
     {
-        if (debug)
-            std::cout << debug_tag << "transmit_symbol(" << sym_num
-                      << ") aborted before start." << std::endl;
-        return;
-    }
-
-    const bool is_tone = (tsym == 0.0);
-    const int f0_idx = sym_num * 2;
-    const int f1_idx = f0_idx + 1;
-
-    if (is_tone)
-    {
-        // Continuous tone
-        while (!stop_requested_.load(std::memory_order_acquire))
+        if (tsym > 1.0)
         {
-            const long int n_pwmclk = PWM_CLOCKS_PER_ITER_NOMINAL;
-
-            // SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
-
-            // TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_pwmclk;
+            std::cerr << debug_tag
+                      << "Warning: tsym is unexpectedly large: " << tsym
+                      << std::endl;
+        }
+        else if (tsym < 0.0001)
+        {
+            std::cerr << debug_tag
+                      << "Warning: tsym is suspiciously small: " << tsym
+                      << std::endl;
         }
     }
-    else
+
+    const std::uint32_t clocks_per_chunk = PWM_CLOCKS_PER_ITER_NOMINAL;
+    const std::uint64_t total_clocks = static_cast<std::uint64_t>(
+        std::llround(tsym * get_pwm_clock()));
+
+    const std::size_t total_chunks = static_cast<std::size_t>(
+        total_clocks / clocks_per_chunk);
+
+    // Lookup the fractional index from the table
+    const double freq_index = trans_params_.dma_table_freq[sym_num];
+    const std::size_t base = static_cast<std::size_t>(std::floor(freq_index));
+    const std::size_t next = base + 1;
+
+    // Clamp next to the end of the table
+    const std::size_t table_size = trans_params_.dma_table_freq.size();
+    const std::size_t safe_next = (next >= table_size) ? table_size - 1 : next;
+
+    // Compute tone weights
+    const double frac = freq_index - static_cast<double>(base);
+    const double weight0 = 1.0 - frac;
+
+    // Use indices directly as PWM words (if pre-encoded, adjust here)
+    const std::uint32_t word0 = static_cast<std::uint32_t>(base);
+    const std::uint32_t word1 = static_cast<std::uint32_t>(safe_next);
+
+    const std::size_t count0 = static_cast<std::size_t>(
+        total_chunks * weight0 + 0.5);
+    const std::size_t count1 = total_chunks - count0;
+
+    std::size_t emitted0 = 0;
+    std::size_t emitted1 = 0;
+
+    for (std::size_t i = 0; i < total_chunks; ++i)
     {
-        // Calculate PWM freq
-        const long int n_pwmclk_per_sym = std::lround(pwm_clock_init_ * tsym);
-        long int n_pwmclk_transmitted = 0;
-        long int n_f0_transmitted = 0;
-
-        // Precompute interpolation ratio outside the loop
-        const double f0_freq = trans_params_.dma_table_freq[f0_idx];
-        const double f1_freq = trans_params_.dma_table_freq[f1_idx];
-        const double tone_freq =
-            trans_params_.frequency - 1.5 * trans_params_.tone_spacing + sym_num * trans_params_.tone_spacing;
-        const double f0_ratio =
-            1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
-
-        while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
-               !stop_requested_.load(std::memory_order_acquire))
+        bool use_f0 = false;
+        if (emitted0 < count0 && emitted1 < count1)
         {
-            // --- compute clocks for this chunk ---
-            long int n_pwmclk =
-                PWM_CLOCKS_PER_ITER_NOMINAL;
-            n_pwmclk += std::lround(
-                (std::rand() / (RAND_MAX + 1.0) - 0.5) * n_pwmclk);
-            if (n_pwmclk_transmitted + n_pwmclk > n_pwmclk_per_sym)
-                n_pwmclk = n_pwmclk_per_sym - n_pwmclk_transmitted;
-
-            const long int n_f0 = std::lround(f0_ratio * (n_pwmclk_transmitted + n_pwmclk)) - n_f0_transmitted;
-            const long int n_f1 = n_pwmclk - n_f0;
-
-            // f0 SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
-
-            // f0 TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f0;
-
-            // f1 SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f1_idx * 4;
-
-            // f1 TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f1;
-
-            // Update counters
-            n_pwmclk_transmitted += n_pwmclk;
-            n_f0_transmitted += n_f0;
+            const double r0 = static_cast<double>(count0 - emitted0);
+            const double r1 = static_cast<double>(count1 - emitted1);
+            use_f0 = (r0 / (r0 + r1)) > 0.5;
         }
+        else if (emitted0 < count0)
+        {
+            use_f0 = true;
+        }
+
+        const std::uint32_t pwm_word = use_f0 ? word0 : word1;
+        if (use_f0)
+            ++emitted0;
+        else
+            ++emitted1;
+
+        dma_buffers_[bufPtr].data[0] = pwm_word;
+        dma_buffers_[bufPtr].data[1] = pwm_word;
+
+        dma_instructions_[bufPtr].SOURCE_AD =
+            Mailbox::busToPhysical(reinterpret_cast<uintptr_t>(&dma_buffers_[bufPtr]));
+
+        dma_instructions_[bufPtr].TXFR_LEN = sizeof(std::uint32_t) * 2;
+
+        dma_instructions_[bufPtr].NEXTCONBK =
+            Mailbox::busToPhysical(reinterpret_cast<uintptr_t>(
+                &dma_instructions_[(bufPtr + 1) % DMA_TABLE_SIZE]));
+
+        bufPtr = (bufPtr + 1) % DMA_TABLE_SIZE;
+    }
+
+    if (debug)
+    {
+        const double ideal_clocks = tsym * get_pwm_clock();
+        std::cerr << debug_tag
+                  << "Symbol " << sym_num << ": "
+                  << "freq_index=" << freq_index
+                  << ", word0=" << word0
+                  << ", word1=" << word1
+                  << ", weight0=" << weight0
+                  << ", total_clocks=" << total_clocks
+                  << ", ideal=" << ideal_clocks
+                  << std::endl;
+
+        verify_symbol_duration(tsym, total_chunks, "Symbol " + std::to_string(sym_num));
+
+        std::cerr << debug_tag
+                  << "Debug: total_chunks=" << total_chunks
+                  << ", clocks_per_chunk=" << clocks_per_chunk
+                  << ", total_clocks=" << total_clocks
+                  << ", pwm_clock=" << get_pwm_clock()
+                  << ", tsym=" << tsym
+                  << std::endl;
     }
 }
 
@@ -1441,10 +1469,10 @@ void WsprTransmitter::create_dma_pages(
     }
 
     // Initialize instruction counter
-    int instrCnt = 0;
+    std::size_t instrCnt = 0;
 
     // Allocate memory pages and create DMA instructions
-    while (instrCnt < 1024)
+    while (instrCnt < DMA_TABLE_SIZE)
     {
         // Allocate a memory page for instructions
         {
@@ -1533,9 +1561,15 @@ void WsprTransmitter::create_dma_pages(
     if (debug)
     {
         uint32_t rng1 = access_bus_address(PWM_BUS_BASE + 0x10);
-        std::cerr << "PWM RNG1: " << rng1 << std::endl;
+        std::cerr << debug_tag
+                  << "PWM RNG1: "
+                  << rng1
+                  << std::endl;
         uint32_t rng2 = access_bus_address(PWM_BUS_BASE + 0x20);
-        std::cerr << "PWM RNG2: " << rng2 << std::endl;
+        std::cerr << debug_tag
+                  << "PWM RNG2: "
+                  << rng2
+                  << std::endl;
     }
     access_bus_address(PWM_BUS_BASE + 0x0) = -1; // Enable FIFO mode, repeat, serializer, and channel
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1816,7 +1850,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
 
     // Initialize tuning word table.
     double tone0_freq = center_freq_actual - 1.5 * trans_params_.tone_spacing;
-    std::vector<long int> tuning_word(1024);
+    std::vector<long int> tuning_word(DMA_TABLE_SIZE);
 
     // Generate tuning words for WSPR tones.
     for (int i = 0; i < 8; i++)
@@ -1844,14 +1878,14 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
     }
 
     // Fill the remaining table with default values.
-    for (int i = 8; i < 1024; i++)
+    for (std::size_t i = 8; i < DMA_TABLE_SIZE; i++)
     {
         double div = 500 + i;
         tuning_word[i] = static_cast<int>(div * std::pow(2.0, 12));
     }
 
     // Program the DMA table.
-    for (int i = 0; i < 1024; i++)
+    for (std::size_t i = 0; i < DMA_TABLE_SIZE; i++)
     {
         trans_params_.dma_table_freq[i] = dma_config_.plld_clock_frequency / (tuning_word[i] / std::pow(2.0, 12));
 
